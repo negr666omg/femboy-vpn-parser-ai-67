@@ -124,6 +124,7 @@ func (n *NetworkNamespace) Close() {
 	_ = n.root(ctx, "ip", "netns", "exec", n.Name, "dhclient", "-r", "-pf", n.dhcpPID)
 	_ = n.root(ctx, "ip", "netns", "del", n.Name)
 	_ = n.root(ctx, "ip", "link", "del", n.hostVeth)
+	_ = n.root(ctx, "rm", "-f", n.dhcpPID, n.dhcpLease)
 	_ = n.root(ctx, "rm", "-rf", n.resolvDir)
 }
 
