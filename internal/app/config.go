@@ -110,7 +110,7 @@ func DefaultOptions() Options {
 		Sources: "sources.txt", OutDir: "out", Interface: "auto",
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4,
-		URLTimeout: 12 * time.Second, SpeedTimeout: 45 * time.Second,
+		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
 		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
 		GeoIPURL: "https://ipwho.is/",
 		ServiceTimeout:   25 * time.Second,
@@ -324,7 +324,7 @@ func ExampleConfig() string {
   },
   "speed_test": {
     "concurrency": 2,
-    "timeout": "45s",
+    "timeout": "85s",
     "first_byte_timeout": "10s",
     "max_duration": "30s",
     "sample_interval": "500ms",
