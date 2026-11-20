@@ -2,6 +2,8 @@ name: Build SubWatch
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,14 +25,10 @@ jobs:
           path: subwatch-source.tar.gz
           if-no-files-found: error
           retention-days: 30
-      - name: Extract source
-        run: mkdir -p src && tar -xzf subwatch-source.tar.gz -C src
-      - name: Test
-        working-directory: src
+      - name: Test current checkout
         run: go test ./... && go vet ./...
       - name: Build Linux amd64
-        working-directory: src
-        run: go build -trimpath -ldflags='-s -w' -o ../sw ./cmd/subwatch
+        run: go build -trimpath -ldflags='-s -w' -o sw ./cmd/subwatch
       - uses: actions/upload-artifact@v4
         with:
           name: sw-linux-amd64
