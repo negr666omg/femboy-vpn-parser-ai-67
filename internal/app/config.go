@@ -21,6 +21,11 @@ type Options struct {
 	ServiceConcurrency int
 	URLTimeout         time.Duration
 	SpeedTimeout       time.Duration
+	FirstByteTimeout   time.Duration
+	MaxSpeedDuration   time.Duration
+	SpeedSampleInterval time.Duration
+	RenameNodes        bool
+	GeoIPURL           string
 	ServiceTimeout     time.Duration
 	URL                string
 	SpeedDownloadURL   string
@@ -71,11 +76,16 @@ type fileConfig struct {
 		UploadBytes   int64    `json:"upload_bytes"`
 		DownloadURL   string   `json:"download_url"`
 		UploadURL     string   `json:"upload_url"`
+		FirstByteTimeout string `json:"first_byte_timeout"`
+		MaxDuration string `json:"max_duration"`
+		SampleInterval string `json:"sample_interval"`
 	} `json:"speed_test"`
 	ServiceCheck struct {
 		Concurrency int    `json:"concurrency"`
 		Timeout     string `json:"timeout"`
 		LookupIP    *bool  `json:"lookup_ip"`
+		RenameNodes *bool `json:"rename_nodes"`
+		GeoIPURL string `json:"geoip_url"`
 	} `json:"service_check"`
 	RemoteUpload struct {
 		Enabled         bool   `json:"enabled"`
@@ -100,7 +110,9 @@ func DefaultOptions() Options {
 		Sources: "sources.txt", OutDir: "out", Interface: "auto",
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4,
-		URLTimeout: 12 * time.Second, SpeedTimeout: 30 * time.Second,
+		URLTimeout: 12 * time.Second, SpeedTimeout: 45 * time.Second,
+		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
+		GeoIPURL: "https://ipwho.is/",
 		ServiceTimeout:   25 * time.Second,
 		URL:              "https://www.gstatic.com/generate_204",
 		SpeedDownloadURL: "https://speed.cloudflare.com/__down?bytes={bytes}",
@@ -164,6 +176,13 @@ func LoadOptions(path string) (Options, error) {
 		}
 		opts.SpeedTimeout = d
 	}
+	for _, item := range []struct{name, value string; target *time.Duration}{
+		{"speed_test.first_byte_timeout", cfg.SpeedTest.FirstByteTimeout, &opts.FirstByteTimeout},
+		{"speed_test.max_duration", cfg.SpeedTest.MaxDuration, &opts.MaxSpeedDuration},
+		{"speed_test.sample_interval", cfg.SpeedTest.SampleInterval, &opts.SpeedSampleInterval},
+	} {
+		if item.value != "" { d, e := time.ParseDuration(item.value); if e != nil || d <= 0 { return opts, fmt.Errorf("%s must be a positive duration: %q", item.name, item.value) }; *item.target = d }
+	}
 	if cfg.SpeedTest.MinDownload != nil {
 		opts.MinDownload = *cfg.SpeedTest.MinDownload
 	}
@@ -192,9 +211,9 @@ func LoadOptions(path string) (Options, error) {
 		}
 		opts.ServiceTimeout = d
 	}
-	if cfg.ServiceCheck.LookupIP != nil {
-		opts.LookupIP = *cfg.ServiceCheck.LookupIP
-	}
+	if cfg.ServiceCheck.LookupIP != nil { opts.LookupIP = *cfg.ServiceCheck.LookupIP }
+	if cfg.ServiceCheck.RenameNodes != nil { opts.RenameNodes = *cfg.ServiceCheck.RenameNodes }
+	if cfg.ServiceCheck.GeoIPURL != "" { opts.GeoIPURL = cfg.ServiceCheck.GeoIPURL }
 	if cfg.RemoteUpload.Enabled {
 		r := cfg.RemoteUpload
 		if r.Method == "" {
@@ -305,7 +324,10 @@ func ExampleConfig() string {
   },
   "speed_test": {
     "concurrency": 2,
-    "timeout": "30s",
+    "timeout": "45s",
+    "first_byte_timeout": "10s",
+    "max_duration": "30s",
+    "sample_interval": "500ms",
     "min_download_mbps": 8,
     "min_upload_mbps": 8,
     "download_bytes": 2097152,
@@ -316,7 +338,9 @@ func ExampleConfig() string {
   "service_check": {
     "concurrency": 4,
     "timeout": "25s",
-    "lookup_ip": false
+    "lookup_ip": false,
+    "rename_nodes": true,
+    "geoip_url": "https://ipwho.is/"
   },
   "output": {
     "directory": "out",
