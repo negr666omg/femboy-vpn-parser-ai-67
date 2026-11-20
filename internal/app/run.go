@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"math"
 	"fmt"
 	"io"
 	"net"
@@ -1011,8 +1012,8 @@ func countryFlag(code string) string {
 }
 
 func formatMbps(value float64, _ int) string {
-	// Keep Mbps values readable and consistent in names and summaries.
-	return strconv.FormatFloat(value, 'f', 0, 64)
+	// Round Mbps to the nearest whole number for names and summaries.
+	return strconv.FormatInt(int64(math.Round(value)), 10)
 }
 
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
