@@ -125,6 +125,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 	lastReportAt := time.Now()
 	startedDownload := false
 	var peakDown float64
+	var downloadFirstByteAt time.Time
 	var readErr error
 	for downloaded < downloadBytes {
 		want := int64(len(buf))
@@ -134,7 +135,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 		n, e := resp.Body.Read(buf[:int(want)])
 		if n > 0 {
 			downloaded += int64(n)
-			if !startedDownload { startedDownload = true; lastReportAt = time.Now(); lastReportBytes = 0 }
+			if !startedDownload { startedDownload = true; downloadFirstByteAt = time.Now(); lastReportAt = downloadFirstByteAt; lastReportBytes = 0 }
 			select { case <-firstByte: default: close(firstByte) }
 			now := time.Now()
 			if now.Sub(lastReportAt) >= sampleInterval || downloaded == downloadBytes {
@@ -168,7 +169,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 		return 0, 0, fmt.Errorf("download: incomplete transfer (%d/%d bytes)", downloaded, downloadBytes)
 	}
 	down := peakDown
-	if down == 0 { down = float64(downloaded) * 8 / elapsed / 1e6 }
+	if down == 0 { sampleSeconds := time.Since(downloadFirstByteAt).Seconds(); if sampleSeconds <= 0 { sampleSeconds = elapsed }; down = float64(downloaded) * 8 / sampleSeconds / 1e6 }
 	if progress != nil {
 		progress(SpeedProgress{Phase: "download complete", CompletedBytes: downloadBytes, TotalBytes: downloadBytes, DownloadMbps: down})
 	}
@@ -194,7 +195,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 	var uploadReader *uploadProgressReader
 	// Always wrap the body: the first-byte deadline must work even without a UI callback.
 	uploadReader = &uploadProgressReader{
-		reader: bytes.NewReader(payload), total: uploadBytes, started: uploadStart, lastReport: uploadStart,
+		reader: bytes.NewReader(payload), total: uploadBytes, started: uploadStart, interval: sampleInterval,
 		onProgress: func(done int64, elapsed time.Duration) {
 			select { case <-uploadFirstByte: default: close(uploadFirstByte) }
 			now := uploadStart.Add(elapsed)
@@ -222,7 +223,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 		return down, 0, fmt.Errorf("upload: invalid duration")
 	}
 	up := peakUpload
-	if up == 0 { up = float64(uploadBytes) * 8 / upElapsed / 1e6 }
+	if up == 0 { sampleSeconds := time.Since(uploadReader.firstByteAt).Seconds(); if sampleSeconds <= 0 { sampleSeconds = upElapsed }; up = float64(uploadBytes) * 8 / sampleSeconds / 1e6 }
 	if progress != nil {
 		progress(SpeedProgress{Phase: "upload complete", CompletedBytes: uploadBytes, TotalBytes: uploadBytes, DownloadMbps: down, UploadMbps: up})
 	}
@@ -250,6 +251,8 @@ type uploadProgressReader struct {
 	started    time.Time
 	lastBytes  int64
 	lastReport time.Time
+	interval time.Duration
+	firstByteAt time.Time
 	onProgress func(int64, time.Duration)
 }
 
@@ -258,7 +261,8 @@ func (r *uploadProgressReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		r.read += int64(n)
 		now := time.Now()
-		if r.onProgress != nil && (r.lastReport.IsZero() || now.Sub(r.lastReport) >= 500*time.Millisecond || r.read == r.total) {
+		if r.firstByteAt.IsZero() { r.firstByteAt = now }
+		if r.onProgress != nil && (r.lastReport.IsZero() || now.Sub(r.lastReport) >= r.interval || r.read == r.total) {
 			r.onProgress(r.read, now.Sub(r.started))
 			r.lastBytes, r.lastReport = r.read, now
 		}
