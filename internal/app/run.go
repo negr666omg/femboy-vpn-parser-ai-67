@@ -713,7 +713,7 @@ func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
 	} else if progress.Phase == "upload" {
 		state = fmt.Sprintf("uploading %d/%d bytes", progress.CompletedBytes, progress.TotalBytes)
 	}
-	return fmt.Sprintf("download: %.2f Mbps | upload: %.2f Mbps | %s", progress.DownloadMbps, progress.UploadMbps, state)
+	return fmt.Sprintf("download: %.0f Mbps | upload: %.0f Mbps | %s", progress.DownloadMbps, progress.UploadMbps, state)
 }
 
 // formatLiveStatusLine keeps ping as a fixed right-hand field. The progress
