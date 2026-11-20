@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,20 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 	port := fmt.Sprint(opts.Port)
 	sshArgs := []string{"-p", port, "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"}
 	sftpArgs := []string{"-P", port, "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"}
+	if strings.TrimSpace(opts.Interface) != "" && opts.Interface != "auto" {
+		it, lookupErr := net.InterfaceByName(opts.Interface)
+		if lookupErr != nil {
+			return fmt.Errorf("SFTP bind interface %q not found: %w", opts.Interface, lookupErr)
+		}
+		if it.Flags&net.FlagUp == 0 {
+			return fmt.Errorf("SFTP bind interface %q exists but is DOWN", opts.Interface)
+		}
+		sshArgs = append(sshArgs, "-o", "BindInterface="+opts.Interface)
+		sftpArgs = append(sftpArgs, "-o", "BindInterface="+opts.Interface)
+		fmt.Fprintf(stdout, "[UPLOAD] Binding SSH/SFTP to interface: %s\\n", opts.Interface)
+	} else {
+		fmt.Fprintln(stdout, "[UPLOAD] SSH/SFTP interface: automatic (system routing)")
+	}
 	if opts.Auth == "private_key" {
 		sshArgs = append(sshArgs, "-i", opts.PrivateKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes")
 		sftpArgs = append(sftpArgs, "-i", opts.PrivateKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes")
