@@ -337,7 +337,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	fmt.Fprintln(stdout, "Output: all.txt, url-test-finished.txt, speedtest-finished.txt, gemini-available.txt, and protocol-only working lists (all files contain URI lines)")
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
-			fmt.Fprintf(stderr, "[UPLOAD] ERROR: %v\\n", uploadErr)
+			fmt.Fprintf(stderr, "[UPLOAD] ERROR: %v\n", uploadErr)
 		} else {
 			fmt.Fprintln(stdout, "[UPLOAD] Finished without reported errors")
 		}
