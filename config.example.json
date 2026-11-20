@@ -15,7 +15,10 @@
   },
   "speed_test": {
     "concurrency": 4,
-    "timeout": "30s",
+    "timeout": "85s",
+    "first_byte_timeout": "10s",
+    "max_duration": "30s",
+    "sample_interval": "500ms",
     "min_download_mbps": 8,
     "min_upload_mbps": 8,
     "download_bytes": 2097152,
@@ -26,7 +29,11 @@
   "service_check": {
     "concurrency": 4,
     "timeout": "25s",
-    "lookup_ip": false
+    "lookup_ip": false,
+    "rename_nodes": true,
+    "geoip_url": "https://ipwho.is/",
+    "name_format": "{flag} {download}↓{upload}↑",
+    "speed_decimals": 1
   },
   "output": {
     "directory": "out",
@@ -42,6 +49,7 @@
     "auth": "private_key",
     "private_key": "~/Downloads/nigger.key",
     "password": "",
-    "remote_directory": "/home/ubuntu/oklol/pidarasy"
+    "remote_directory": "/home/ubuntu/oklol/pidarasy",
+    "interface": ""
   }
 }

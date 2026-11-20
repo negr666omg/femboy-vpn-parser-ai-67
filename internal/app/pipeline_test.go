@@ -24,8 +24,8 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
   "sources":{"file":"subs.txt"},
   "protocols":{"enabled":["vless","shadowsocks"]},
   "url_test":{"url":"https://example.com/204","concurrency":6,"timeout":"9s"},
-  "speed_test":{"concurrency":3,"timeout":"45s","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
-  "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true},
+  "speed_test":{"concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
+  "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json","name_format":"{flag} {download}↓{upload}↑","speed_decimals":2},
   "final_check":{"enabled":false,"concurrency":1,"timeout":"8s"},
   "output":{"directory":"results","split_by_protocol":true,"subscription_text":false}
 }`
@@ -42,13 +42,13 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if opts.URLConcurrency != 6 || opts.SpeedConcurrency != 3 || opts.ServiceConcurrency != 2 {
 		t.Fatalf("unexpected concurrency: %+v", opts)
 	}
-	if opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second {
+	if opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second || opts.FirstByteTimeout != 6*time.Second || opts.MaxSpeedDuration != 17*time.Second || opts.SpeedSampleInterval != 500*time.Millisecond {
 		t.Fatalf("unexpected timeouts: %+v", opts)
 	}
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
 		t.Fatalf("protocol aliases not normalized: %#v", opts.Protocols)
 	}
-	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.SplitByProtocol || opts.WriteText {
+	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
 	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
@@ -502,5 +502,25 @@ func TestRemoteUploadConfigAndDefaults(t *testing.T) {
 	}
 	if opts.RemoteUpload.PrivateKey == "~/.ssh/id_ed25519" {
 		t.Fatal("private key home shortcut was not expanded")
+	}
+}
+
+func TestMergeResultsKeepsUpdatedURIAfterRename(t *testing.T) {
+	original := sub.Node{URI: "vless://example.test:443#old", Key: "stable-key", Name: "old"}
+	renamed := original
+	renamed.URI = "vless://example.test:443#🇩🇪%2070%E2%86%9334%E2%86%91"
+	renamed.Name = "🇩🇪 70↓34↑"
+	got := mergeResults([]sub.Node{original}, []sub.Node{original}, []sub.Node{renamed}, []sub.Node{renamed})
+	if len(got) != 1 || got[0].URI != renamed.URI || got[0].Name != renamed.Name {
+		t.Fatalf("renamed URI was lost during merge: %#v", got)
+	}
+}
+
+func TestFormatMbpsRoundsToWholeNumbers(t *testing.T) {
+	cases := []struct{ value float64; decimals int; want string }{
+		{70, 0, "70"}, {70.4, 2, "70"}, {70.5, 1, "71"}, {0.4, 2, "0"}, {0.5, 1, "1"}, {0.55, 2, "1"},
+	}
+	for _, tc := range cases {
+		if got := formatMbps(tc.value, tc.decimals); got != tc.want { t.Errorf("formatMbps(%v,%d)=%q want %q", tc.value, tc.decimals, got, tc.want) }
 	}
 }

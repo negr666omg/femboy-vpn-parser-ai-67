@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"math"
 	"fmt"
 	"io"
 	"net"
@@ -100,9 +101,16 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		opts.Interface = "auto"
 	}
 	if opts.Interface != "auto" {
-		if _, err := net.InterfaceByName(opts.Interface); err != nil {
-			return fmt.Errorf("network interface %q not found (run 'sw interfaces')", opts.Interface)
+		it, err := net.InterfaceByName(opts.Interface)
+		if err != nil {
+			return fmt.Errorf("network interface %q not found (run 'sw interfaces'): %w", opts.Interface, err)
 		}
+		if it.Flags&net.FlagUp == 0 {
+			return fmt.Errorf("network interface %q exists but is DOWN", opts.Interface)
+		}
+		fmt.Fprintf(stdout, "[network] sing-box outbound binding: %s (UP)\n", it.Name)
+	} else {
+		fmt.Fprintln(stdout, "[network] sing-box outbound binding: automatic (system routing)")
 	}
 	if opts.Sources == "" {
 		opts.Sources = "sources.txt"
@@ -213,7 +221,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return fmt.Errorf("no nodes match enabled protocols: %s", strings.Join(opts.Protocols, ", "))
 	}
 	fmt.Fprintf(stdout, "Deduplicated: %d unique | %d duplicates | enabled protocols: %s | nodes to test: %d\n", len(unique), duplicates, strings.Join(opts.Protocols, ","), len(selected))
-	fmt.Fprintf(stdout, "Interface: %s | URL concurrency: %d | speed concurrency: %d | service concurrency: %d\n", opts.Interface, opts.URLConcurrency, opts.SpeedConcurrency, opts.ServiceConcurrency)
+	fmt.Fprintf(stdout, "Proxy interface: %s | URL concurrency: %d | speed concurrency: %d | service concurrency: %d\n", opts.Interface, opts.URLConcurrency, opts.SpeedConcurrency, opts.ServiceConcurrency)
 	fmt.Fprintf(stdout, "Speed payload: %.2f/%.2f MiB | minimum DL/UL: %.2f/%.2f Mbps | download URL: %s | upload URL: %s\n", float64(opts.DownloadBytes)/(1<<20), float64(opts.UploadBytes)/(1<<20), opts.MinDownload, opts.MinUpload, opts.SpeedDownloadURL, opts.SpeedUploadURL)
 
 	fmt.Fprintln(stdout, "[prepare] Checking sing-box; first run may download the verified core...")
@@ -223,6 +231,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	opts.CorePath = corePath
 	fmt.Fprintf(stdout, "[prepare] sing-box ready: %s\n", corePath)
+	if opts.Interface != "auto" {
+		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
+		if nsErr != nil { return fmt.Errorf("prepare isolated network: %w", nsErr) }
+		if ns != nil { defer ns.Close(); opts.NetworkNamespace = ns.Name }
+	}
 
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
 	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
@@ -277,6 +290,19 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return
 		}
 		n.SpeedPassed = true
+		if opts.RenameNodes {
+			geoErr := withNodeClient(stageCtx, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
+				country := lookupCountry(ctx, client, opts.GeoIPURL)
+				flag := countryFlag(country)
+				if flag == "" { return fmt.Errorf("GeoIP country lookup failed") }
+				n.Country = country
+				name := strings.NewReplacer("{flag}", flag, "{download}", formatMbps(down, opts.SpeedDecimals), "{upload}", formatMbps(up, opts.SpeedDecimals)).Replace(opts.NameFormat)
+				if name == opts.NameFormat { return fmt.Errorf("service_check.name_format has no supported placeholders") }
+				sub.RenameNode(n, name)
+				return nil
+			})
+			if geoErr != nil { n.SpeedError = "rename: " + geoErr.Error() }
+		}
 		live(*n, speedLiveDetail(*n, "PASS"))
 	}, nil)
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
@@ -323,8 +349,12 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	fmt.Fprintln(stdout, "Output: all.txt, url-test-finished.txt, speedtest-finished.txt, gemini-available.txt, and protocol-only working lists (all files contain URI lines)")
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
-			fmt.Fprintf(stderr, "[UPLOAD] WARNING: %v\n", uploadErr)
+			fmt.Fprintf(stderr, "[UPLOAD] ERROR: %v\n", uploadErr)
+		} else {
+			fmt.Fprintln(stdout, "[UPLOAD] Finished without reported errors")
 		}
+	} else {
+		fmt.Fprintln(stdout, "[UPLOAD] Skipped: remote_upload.enabled is false in the loaded config")
 	}
 	return ctx.Err()
 }
@@ -690,7 +720,7 @@ func urlLiveDetail(n sub.Node) string {
 }
 
 func speedLiveDetail(n sub.Node, state string) string {
-	return fmt.Sprintf("download: %.2f Mbps | upload: %.2f Mbps | %s", n.DownloadMbps, n.UploadMbps, cleanLiveText(state))
+	return fmt.Sprintf("download: %.0f Mbps | upload: %.0f Mbps | %s", n.DownloadMbps, n.UploadMbps, cleanLiveText(state))
 }
 
 func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
@@ -700,7 +730,7 @@ func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
 	} else if progress.Phase == "upload" {
 		state = fmt.Sprintf("uploading %d/%d bytes", progress.CompletedBytes, progress.TotalBytes)
 	}
-	return fmt.Sprintf("download: %.2f Mbps | upload: %.2f Mbps | %s", progress.DownloadMbps, progress.UploadMbps, state)
+	return fmt.Sprintf("download: %.0f Mbps | upload: %.0f Mbps | %s", progress.DownloadMbps, progress.UploadMbps, state)
 }
 
 // formatLiveStatusLine keeps ping as a fixed right-hand field. The progress
@@ -953,10 +983,10 @@ func runURLTest(parent context.Context, n sub.Node, opts Options) (bool, int64, 
 func speedThresholdError(download, upload, minDownload, minUpload float64) string {
 	var reasons []string
 	if download < minDownload {
-		reasons = append(reasons, fmt.Sprintf("download %.2f < %.2f Mbps", download, minDownload))
+		reasons = append(reasons, fmt.Sprintf("download %.0f < %.0f Mbps", download, minDownload))
 	}
 	if upload < minUpload {
-		reasons = append(reasons, fmt.Sprintf("upload %.2f < %.2f Mbps", upload, minUpload))
+		reasons = append(reasons, fmt.Sprintf("upload %.0f < %.0f Mbps", upload, minUpload))
 	}
 	return strings.Join(reasons, "; ")
 }
@@ -971,10 +1001,35 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 		testCtx, cancel := context.WithTimeout(ctx, opts.SpeedTimeout)
 		defer cancel()
 		var testErr error
-		down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress)
+		down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress, opts.FirstByteTimeout, opts.MaxSpeedDuration, opts.SpeedSampleInterval)
 		return testErr
 	})
 	return down, up, err
+}
+
+
+func lookupCountry(ctx context.Context, client *http.Client, endpoint string) string {
+	if endpoint == "" { endpoint = "https://ipwho.is/" }
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil { return "" }
+	resp, err := client.Do(req)
+	if err != nil { return "" }
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 { return "" }
+	var data map[string]any
+	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&data) != nil { return "" }
+	code, _ := data["country_code"].(string)
+	return strings.ToUpper(strings.TrimSpace(code))
+}
+
+func countryFlag(code string) string {
+	if len(code) != 2 || code[0] < 65 || code[0] > 90 || code[1] < 65 || code[1] > 90 { return "" }
+	return string([]rune{rune(0x1F1E6 + int(code[0]) - 65), rune(0x1F1E6 + int(code[1]) - 65)})
+}
+
+func formatMbps(value float64, _ int) string {
+	// Round Mbps to the nearest whole number for names and summaries.
+	return strconv.FormatInt(int64(math.Round(value)), 10)
 }
 
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
@@ -1001,7 +1056,7 @@ func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, 
 func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, *http.Client) error) error {
 	startCtx, cancel := context.WithTimeout(parent, timeout+8*time.Second)
 	defer cancel()
-	inst, err := core.Start(startCtx, opts.CorePath, n.Outbound, opts.Interface)
+	inst, err := core.Start(startCtx, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -1195,7 +1250,7 @@ func writeReport(path string, nodes []sub.Node) error {
 	w := csv.NewWriter(f)
 	_ = w.Write([]string{"name", "protocol", "uri", "url_passed", "url_latency_ms", "url_error", "speed_passed", "download_mbps", "upload_mbps", "speed_error", "gemini_status", "gemini_note", "gemini_region", "service_error", "exit_ip", "country", "asn", "org", "ip_type", "ip_flags"})
 	for _, n := range nodes {
-		_ = w.Write([]string{n.Name, protocolOf(n), n.URI, strconv.FormatBool(n.URLPassed), strconv.FormatInt(n.URLLatencyMS, 10), n.URLError, strconv.FormatBool(n.SpeedPassed), fmt.Sprintf("%.3f", n.DownloadMbps), fmt.Sprintf("%.3f", n.UploadMbps), n.SpeedError, n.GeminiStatus, n.GeminiNote, n.GeminiRegion, n.ServiceError, n.ExitIP, n.Country, n.ASN, n.Org, n.IPType, flagsJSON(n.IPFlags)})
+		_ = w.Write([]string{n.Name, protocolOf(n), n.URI, strconv.FormatBool(n.URLPassed), strconv.FormatInt(n.URLLatencyMS, 10), n.URLError, strconv.FormatBool(n.SpeedPassed), fmt.Sprintf("%.0f", n.DownloadMbps), fmt.Sprintf("%.0f", n.UploadMbps), n.SpeedError, n.GeminiStatus, n.GeminiNote, n.GeminiRegion, n.ServiceError, n.ExitIP, n.Country, n.ASN, n.Org, n.IPType, flagsJSON(n.IPFlags)})
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
@@ -1205,21 +1260,15 @@ func writeReport(path string, nodes []sub.Node) error {
 }
 
 func mergeResults(selected, urlResults, speedResults, serviceResults []sub.Node) []sub.Node {
-	byURI := make(map[string]sub.Node, len(selected))
-	for _, n := range selected {
-		byURI[n.URI] = n
-	}
+	// URI can change after speed testing; the outbound key remains stable.
+	identity := func(n sub.Node) string { if n.Key != "" { return n.Key }; return n.URI }
+	byKey := make(map[string]sub.Node, len(selected))
+	for _, n := range selected { byKey[identity(n)] = n }
 	for _, group := range [][]sub.Node{urlResults, speedResults, serviceResults} {
-		for _, n := range group {
-			byURI[n.URI] = n
-		}
+		for _, n := range group { byKey[identity(n)] = n }
 	}
 	out := make([]sub.Node, 0, len(selected))
-	for _, n := range selected {
-		if updated, ok := byURI[n.URI]; ok {
-			out = append(out, updated)
-		}
-	}
+	for _, n := range selected { if updated, ok := byKey[identity(n)]; ok { out = append(out, updated) } }
 	return out
 }
 

@@ -14,6 +14,7 @@ type Options struct {
 	Sources            string
 	OutDir             string
 	Interface          string
+	NetworkNamespace   string
 	CorePath           string
 	Protocols          []string
 	URLConcurrency     int
@@ -21,6 +22,13 @@ type Options struct {
 	ServiceConcurrency int
 	URLTimeout         time.Duration
 	SpeedTimeout       time.Duration
+	FirstByteTimeout   time.Duration
+	MaxSpeedDuration   time.Duration
+	SpeedSampleInterval time.Duration
+	RenameNodes        bool
+	GeoIPURL           string
+	NameFormat         string
+	SpeedDecimals      int
 	ServiceTimeout     time.Duration
 	URL                string
 	SpeedDownloadURL   string
@@ -45,6 +53,7 @@ type RemoteUploadOptions struct {
 	PrivateKey      string
 	Password        string
 	RemoteDirectory string
+	Interface       string
 }
 
 type fileConfig struct {
@@ -71,11 +80,18 @@ type fileConfig struct {
 		UploadBytes   int64    `json:"upload_bytes"`
 		DownloadURL   string   `json:"download_url"`
 		UploadURL     string   `json:"upload_url"`
+		FirstByteTimeout string `json:"first_byte_timeout"`
+		MaxDuration string `json:"max_duration"`
+		SampleInterval string `json:"sample_interval"`
 	} `json:"speed_test"`
 	ServiceCheck struct {
 		Concurrency int    `json:"concurrency"`
 		Timeout     string `json:"timeout"`
 		LookupIP    *bool  `json:"lookup_ip"`
+		RenameNodes *bool `json:"rename_nodes"`
+		GeoIPURL string `json:"geoip_url"`
+		NameFormat string `json:"name_format"`
+		SpeedDecimals *int `json:"speed_decimals"`
 	} `json:"service_check"`
 	RemoteUpload struct {
 		Enabled         bool   `json:"enabled"`
@@ -87,6 +103,7 @@ type fileConfig struct {
 		PrivateKey      string `json:"private_key"`
 		Password        string `json:"password"`
 		RemoteDirectory string `json:"remote_directory"`
+		Interface       string `json:"interface"`
 	} `json:"remote_upload"`
 	Output struct {
 		Directory        string `json:"directory"`
@@ -100,7 +117,9 @@ func DefaultOptions() Options {
 		Sources: "sources.txt", OutDir: "out", Interface: "auto",
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4,
-		URLTimeout: 12 * time.Second, SpeedTimeout: 30 * time.Second,
+		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
+		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
+		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {download}↓{upload}↑", SpeedDecimals: 1,
 		ServiceTimeout:   25 * time.Second,
 		URL:              "https://www.gstatic.com/generate_204",
 		SpeedDownloadURL: "https://speed.cloudflare.com/__down?bytes={bytes}",
@@ -164,6 +183,13 @@ func LoadOptions(path string) (Options, error) {
 		}
 		opts.SpeedTimeout = d
 	}
+	for _, item := range []struct{name, value string; target *time.Duration}{
+		{"speed_test.first_byte_timeout", cfg.SpeedTest.FirstByteTimeout, &opts.FirstByteTimeout},
+		{"speed_test.max_duration", cfg.SpeedTest.MaxDuration, &opts.MaxSpeedDuration},
+		{"speed_test.sample_interval", cfg.SpeedTest.SampleInterval, &opts.SpeedSampleInterval},
+	} {
+		if item.value != "" { d, e := time.ParseDuration(item.value); if e != nil || d <= 0 { return opts, fmt.Errorf("%s must be a positive duration: %q", item.name, item.value) }; *item.target = d }
+	}
 	if cfg.SpeedTest.MinDownload != nil {
 		opts.MinDownload = *cfg.SpeedTest.MinDownload
 	}
@@ -192,9 +218,12 @@ func LoadOptions(path string) (Options, error) {
 		}
 		opts.ServiceTimeout = d
 	}
-	if cfg.ServiceCheck.LookupIP != nil {
-		opts.LookupIP = *cfg.ServiceCheck.LookupIP
-	}
+	if cfg.ServiceCheck.LookupIP != nil { opts.LookupIP = *cfg.ServiceCheck.LookupIP }
+	if cfg.ServiceCheck.RenameNodes != nil { opts.RenameNodes = *cfg.ServiceCheck.RenameNodes }
+	if cfg.ServiceCheck.GeoIPURL != "" { opts.GeoIPURL = cfg.ServiceCheck.GeoIPURL }
+	if cfg.ServiceCheck.NameFormat != "" { opts.NameFormat = cfg.ServiceCheck.NameFormat }
+	if opts.NameFormat != "" && !strings.Contains(opts.NameFormat, "{flag}") && !strings.Contains(opts.NameFormat, "{download}") && !strings.Contains(opts.NameFormat, "{upload}") { return opts, fmt.Errorf("service_check.name_format must include {flag}, {download}, or {upload}") }
+	if cfg.ServiceCheck.SpeedDecimals != nil { if *cfg.ServiceCheck.SpeedDecimals < 0 || *cfg.ServiceCheck.SpeedDecimals > 3 { return opts, fmt.Errorf("service_check.speed_decimals must be between 0 and 3") }; opts.SpeedDecimals = *cfg.ServiceCheck.SpeedDecimals }
 	if cfg.RemoteUpload.Enabled {
 		r := cfg.RemoteUpload
 		if r.Method == "" {
@@ -226,7 +255,7 @@ func LoadOptions(path string) (Options, error) {
 				r.PrivateKey = filepath.Join(home, r.PrivateKey[2:])
 			}
 		}
-		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory}
+		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory, Interface: strings.TrimSpace(r.Interface)}
 	}
 	if cfg.Output.Directory != "" {
 		opts.OutDir = cfg.Output.Directory
@@ -305,7 +334,10 @@ func ExampleConfig() string {
   },
   "speed_test": {
     "concurrency": 2,
-    "timeout": "30s",
+    "timeout": "85s",
+    "first_byte_timeout": "10s",
+    "max_duration": "30s",
+    "sample_interval": "500ms",
     "min_download_mbps": 8,
     "min_upload_mbps": 8,
     "download_bytes": 2097152,
@@ -316,7 +348,11 @@ func ExampleConfig() string {
   "service_check": {
     "concurrency": 4,
     "timeout": "25s",
-    "lookup_ip": false
+    "lookup_ip": false,
+    "rename_nodes": true,
+    "geoip_url": "https://ipwho.is/",
+    "name_format": "{flag} {download}↓{upload}↑",
+    "speed_decimals": 1
   },
   "output": {
     "directory": "out",
@@ -332,7 +368,8 @@ func ExampleConfig() string {
     "auth": "private_key",
     "private_key": "~/.ssh/id_ed25519",
     "password": "",
-    "remote_directory": "/home/ubuntu/oklol/pidarasy"
+    "remote_directory": "/home/ubuntu/oklol/pidarasy",
+    "interface": ""
   }
 }
 `

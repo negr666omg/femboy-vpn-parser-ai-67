@@ -12,7 +12,7 @@ go vet ./...
 go build -trimpath -ldflags='-s -w' -o sw ./cmd/subwatch
 ```
 
-## First run
+## Linux interface isolation\n\nWhen `network.interface` is set to a specific physical interface, SubWatch creates a temporary Linux network namespace, obtains a separate DHCP lease on a macvlan attached to that interface, and connects the local sing-box listener back to the host over a private veth link. It does not rewrite host routes, policy rules, firewall rules, or the host resolver. The namespace and temporary links are removed when the run ends. Install `iproute2`, `sudo`, `util-linux` (`setpriv`), and `isc-dhcp-client` (`dhclient`) first. A network or Wi-Fi adapter that blocks additional MAC addresses cannot use this mode; SubWatch reports setup failure rather than silently falling back to the host VPN.\n\n## First run
 
 ```bash
 chmod +x sw
@@ -40,12 +40,12 @@ Each testing stage uses one replaceable terminal status line instead of printing
 
 See [`config.example.json`](./config.example.json). All settings are optional; defaults are used for omitted values.
 
-- `network.interface`: `auto`, `eno1`, `throne-tun`, or another local interface name.
+- `network.interface`: `auto` uses normal system routing. On Linux, selecting a physical interface (for example `eno1`) creates an isolated network namespace with a separate macvlan address obtained by DHCP; node traffic leaves through that interface without using the host VPN routing rules. This requires `iproute2`, `sudo`, `setpriv` (util-linux), and an installed DHCP client (`dhclient`). The first run asks for administrator authorization. The network must permit a second MAC address; some Wi-Fi adapters/access points do not. The host network configuration and DNS are not changed.
 - `sources.file`: source list path. Relative paths are resolved relative to the config file.
 - `protocols.enabled`: protocols to test (`vless`, `vmess`, `trojan`, `ss`, `hysteria2`, `tuic`, `socks`, `http`). Aliases `shadowsocks`, `hy2`, and `socks5` are accepted.
 - `url_test`: URL used for the reachability check, concurrency, and timeout.
-- `speed_test`: separate concurrency and timeout, minimum download/upload Mbps, payload sizes in bytes, and custom download/upload HTTP URLs. The download URL may contain `{bytes}`, replaced with the configured download size. The upload URL must accept a raw HTTP `POST` body and return a 2xx response.
-- `service_check`: concurrency, timeout, and optional exit-IP lookup.
+- `speed_test`: separate concurrency and overall timeout, first-byte timeout, maximum measurement duration after the first byte (per direction), sampling interval, independent download/upload Mbps thresholds, payload sizes, and custom HTTP URLs. The reported speed is the **fastest observed sample interval**, not the average across the full transfer. The download URL may contain `{bytes}`; the upload URL must accept a raw HTTP `POST` body and return 2xx.
+- `service_check`: concurrency, timeout, optional exit-IP lookup, automatic node renaming, GeoIP endpoint, name template (`{flag}`, `{download}`, `{upload}`), and Mbps decimal precision. By default, speed-passed nodes are renamed in their exported URI remark, for example `🇩🇪 70↓34↑`; GeoIP is requested through the tested proxy.
 - `output`: output directory. The five result groups are always written as URI-only `.txt` files; protocol-specific working lists are always enabled.
 
 The default speed test uses 2 MiB download and 2 MiB upload payloads, a concurrency of 2, and minimums of 8 Mbps in both directions. **8 Mbps is approximately 1 MB/s.** Speed-test concurrency is deliberately lower than URL-test concurrency because simultaneous throughput tests share the machine's internet connection and can reduce measured rates. Set it to `1` for the least contention or increase it when throughput is ample.
@@ -57,7 +57,7 @@ Stage timeouts are independently configurable. CLI flags override the config fil
 ./sw run --url-concurrency 12 --speed-concurrency 1
 ./sw run --url 'https://www.gstatic.com/generate_204'
 ./sw run --download-url 'https://speed.cloudflare.com/__down?bytes={bytes}' --upload-url 'https://speed.cloudflare.com/__up'
-./sw run --min-download 8 --min-upload 8 --speed-timeout 30s
+./sw run --min-download 8 --min-upload 8 --speed-timeout 85s
 ```
 
 For compatibility, an old `config.json` containing a `final_check` object is accepted, but that obsolete setting is ignored. The duplicate stage no longer exists.

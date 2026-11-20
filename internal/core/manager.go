@@ -168,7 +168,7 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 	return n, err
 }
 
-func Start(ctx context.Context, binary string, outbound map[string]any, iface string) (*Instance, error) {
+func Start(ctx context.Context, binary string, outbound map[string]any, iface string, namespace ...string) (*Instance, error) {
 	proxyBin, err := FindOrDownload(binary)
 	if err != nil {
 		return nil, err
@@ -179,6 +179,9 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
+	listenAddr := "127.0.0.1"
+	namespaceName := ""
+	if len(namespace) > 0 { namespaceName = namespace[0]; if namespaceName != "" { listenAddr = "10.254.0.2" } }
 	out := make(map[string]any, len(outbound)+1)
 	for k, v := range outbound {
 		if k != "_name" {
@@ -186,10 +189,17 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 		}
 	}
 	out["tag"] = "proxy"
-	if iface != "" && iface != "auto" {
+	if namespaceName == "" && iface != "" && iface != "auto" {
+		it, lookupErr := net.InterfaceByName(iface)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("network interface %q not found: %w", iface, lookupErr)
+		}
+		if it.Flags&net.FlagUp == 0 {
+			return nil, fmt.Errorf("network interface %q exists but is DOWN", iface)
+		}
 		out["bind_interface"] = iface
 	}
-	cfg := map[string]any{"log": map[string]any{"level": "error"}, "inbounds": []any{map[string]any{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": port}}, "outbounds": []any{out, map[string]any{"type": "direct", "tag": "direct"}}, "route": map[string]any{"final": "proxy"}}
+	cfg := map[string]any{"log": map[string]any{"level": "error"}, "inbounds": []any{map[string]any{"type": "mixed", "tag": "mixed-in", "listen": listenAddr, "listen_port": port}}, "outbounds": []any{out, map[string]any{"type": "direct", "tag": "direct"}}, "route": map[string]any{"final": "proxy"}}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return nil, err
@@ -208,21 +218,22 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 		os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("sing-box config: %w: %s", e, strings.TrimSpace(string(output)))
 	}
-	cmd := exec.Command(proxyBin, "run", "-c", cfgPath)
+	var cmd *exec.Cmd
+	if namespaceName != "" { cmd = (&NetworkNamespace{Name: namespaceName}).Command(ctx, proxyBin, "run", "-c", cfgPath) } else { cmd = exec.CommandContext(ctx, proxyBin, "run", "-c", cfgPath) }
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err = cmd.Start(); err != nil {
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
-	inst := &Instance{ProxyURL: fmt.Sprintf("http://127.0.0.1:%d", port), cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir}
+	inst := &Instance{ProxyURL: fmt.Sprintf("http://%s:%d", listenAddr, port), cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir}
 	go func() { inst.done <- cmd.Wait() }()
 	deadline := time.NewTimer(8 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		conn, e := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+		conn, e := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", listenAddr, port), 200*time.Millisecond)
 		if e == nil {
 			conn.Close()
 			return inst, nil
