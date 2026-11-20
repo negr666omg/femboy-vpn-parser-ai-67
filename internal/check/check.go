@@ -189,23 +189,16 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 	uploadFirstByte := make(chan struct{})
 	go enforceTransferWindow(uploadCtx, uploadCancel, uploadFirstByte, firstByteTimeout, maxDuration)
 	ureq = ureq.WithContext(uploadCtx)
-	var peakUpload float64
-	lastUploadBytes := int64(0)
-	lastUploadAt := time.Time{}
-	var uploadReader *uploadProgressReader
-	// Always wrap the body: the first-byte deadline must work even without a UI callback.
-	uploadReader = &uploadProgressReader{
+	uploadReader := &uploadProgressReader{
 		reader: bytes.NewReader(payload), total: uploadBytes, started: uploadStart, interval: sampleInterval,
-		onProgress: func(done int64, elapsed time.Duration) {
+		onProgress: func(done int64, _ time.Duration) {
 			select { case <-uploadFirstByte: default: close(uploadFirstByte) }
-			now := uploadStart.Add(elapsed)
-			if lastUploadAt.IsZero() { lastUploadAt = now }
-			window := now.Sub(lastUploadAt).Seconds()
-			rate := 0.0
-			if window > 0 { rate = float64(done-lastUploadBytes) * 8 / window / 1e6 }
-			if rate > peakUpload { peakUpload = rate }
-			lastUploadBytes, lastUploadAt = done, now
-			if progress != nil { progress(SpeedProgress{Phase: "upload", CompletedBytes: done, TotalBytes: uploadBytes, DownloadMbps: down, UploadMbps: peakUpload}) }
+			// Bytes read by net/http are not proof that bytes reached the network.
+			// Keep progress byte-based and report the measured rate only after the
+			// server has received the complete request and answered.
+			if progress != nil {
+				progress(SpeedProgress{Phase: "upload", CompletedBytes: done, TotalBytes: uploadBytes, DownloadMbps: down})
+			}
 		},
 	}
 	ureq.Body = io.NopCloser(uploadReader)
@@ -223,8 +216,9 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 	if upElapsed <= 0 {
 		return down, 0, fmt.Errorf("upload: invalid duration")
 	}
-	up := peakUpload
-	if up == 0 { sampleSeconds := time.Since(uploadReader.firstByteAt).Seconds(); if sampleSeconds <= 0 { sampleSeconds = upElapsed }; up = float64(uploadBytes) * 8 / sampleSeconds / 1e6 }
+	// Measure the full request round-trip: unlike counting Body.Read calls,
+	// this includes the time until the upload endpoint has accepted the body.
+	up := float64(uploadBytes) * 8 / upElapsed / 1e6
 	if progress != nil {
 		progress(SpeedProgress{Phase: "upload complete", CompletedBytes: uploadBytes, TotalBytes: uploadBytes, DownloadMbps: down, UploadMbps: up})
 	}
