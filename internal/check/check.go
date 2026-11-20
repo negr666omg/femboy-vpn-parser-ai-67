@@ -192,7 +192,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 	lastUploadAt := uploadStart
 	// Always wrap the body: the first-byte deadline must work even without a UI callback.
 	ureq.Body = io.NopCloser(&uploadProgressReader{
-		reader: bytes.NewReader(payload), total: uploadBytes, started: uploadStart,
+		reader: bytes.NewReader(payload), total: uploadBytes, started: uploadStart, lastReport: uploadStart,
 		onProgress: func(done int64, elapsed time.Duration) {
 			select { case <-uploadFirstByte: default: close(uploadFirstByte) }
 			now := uploadStart.Add(elapsed)
