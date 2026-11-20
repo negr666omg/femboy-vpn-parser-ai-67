@@ -1241,21 +1241,15 @@ func writeReport(path string, nodes []sub.Node) error {
 }
 
 func mergeResults(selected, urlResults, speedResults, serviceResults []sub.Node) []sub.Node {
-	byURI := make(map[string]sub.Node, len(selected))
-	for _, n := range selected {
-		byURI[n.URI] = n
-	}
+	// URI can change after speed testing; the outbound key remains stable.
+	identity := func(n sub.Node) string { if n.Key != "" { return n.Key }; return n.URI }
+	byKey := make(map[string]sub.Node, len(selected))
+	for _, n := range selected { byKey[identity(n)] = n }
 	for _, group := range [][]sub.Node{urlResults, speedResults, serviceResults} {
-		for _, n := range group {
-			byURI[n.URI] = n
-		}
+		for _, n := range group { byKey[identity(n)] = n }
 	}
 	out := make([]sub.Node, 0, len(selected))
-	for _, n := range selected {
-		if updated, ok := byURI[n.URI]; ok {
-			out = append(out, updated)
-		}
-	}
+	for _, n := range selected { if updated, ok := byKey[identity(n)]; ok { out = append(out, updated) } }
 	return out
 }
 
