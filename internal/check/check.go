@@ -134,7 +134,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 		n, e := resp.Body.Read(buf[:int(want)])
 		if n > 0 {
 			downloaded += int64(n)
-			if !startedDownload { startedDownload = true; lastReportAt = time.Now(); lastReportBytes = downloaded }
+			if !startedDownload { startedDownload = true; lastReportAt = time.Now(); lastReportBytes = 0 }
 			select { case <-firstByte: default: close(firstByte) }
 			now := time.Now()
 			if now.Sub(lastReportAt) >= sampleInterval || downloaded == downloadBytes {
@@ -190,27 +190,30 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 	ureq = ureq.WithContext(uploadCtx)
 	var peakUpload float64
 	lastUploadBytes := int64(0)
-	lastUploadAt := uploadStart
+	lastUploadAt := time.Time{}
+	var uploadReader *uploadProgressReader
 	// Always wrap the body: the first-byte deadline must work even without a UI callback.
-	ureq.Body = io.NopCloser(&uploadProgressReader{
+	uploadReader = &uploadProgressReader{
 		reader: bytes.NewReader(payload), total: uploadBytes, started: uploadStart, lastReport: uploadStart,
 		onProgress: func(done int64, elapsed time.Duration) {
 			select { case <-uploadFirstByte: default: close(uploadFirstByte) }
 			now := uploadStart.Add(elapsed)
+			if lastUploadAt.IsZero() { lastUploadAt = now }
 			window := now.Sub(lastUploadAt).Seconds()
 			rate := 0.0
 			if window > 0 { rate = float64(done-lastUploadBytes) * 8 / window / 1e6 }
 			if rate > peakUpload { peakUpload = rate }
 			lastUploadBytes, lastUploadAt = done, now
 			if progress != nil { progress(SpeedProgress{Phase: "upload", CompletedBytes: done, TotalBytes: uploadBytes, DownloadMbps: down, UploadMbps: peakUpload}) }
-		},
-	})
+		}
+	ureq.Body = io.NopCloser(uploadReader)
 	uresp, err := client.Do(ureq)
 	if err != nil {
 		return down, 0, fmt.Errorf("upload: %w", err)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(uresp.Body, 4096))
 	_ = uresp.Body.Close()
+	if uploadReader.read != uploadBytes { return down, 0, fmt.Errorf("upload: sent %d/%d bytes", uploadReader.read, uploadBytes) }
 	upElapsed := time.Since(uploadStart).Seconds()
 	if uresp.StatusCode < 200 || uresp.StatusCode >= 300 {
 		return down, 0, fmt.Errorf("upload: HTTP %d", uresp.StatusCode)
@@ -255,7 +258,7 @@ func (r *uploadProgressReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		r.read += int64(n)
 		now := time.Now()
-		if r.onProgress != nil && (now.Sub(r.lastReport) >= 500*time.Millisecond || r.read == r.total) {
+		if r.onProgress != nil && (r.lastReport.IsZero() || now.Sub(r.lastReport) >= 500*time.Millisecond || r.read == r.total) {
 			r.onProgress(r.read, now.Sub(r.started))
 			r.lastBytes, r.lastReport = r.read, now
 		}
