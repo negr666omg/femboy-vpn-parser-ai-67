@@ -4,7 +4,7 @@ Linux-first Go CLI for parsing and deduplicating VLESS/VMess/Trojan/Shadowsocks/
 
 ## Build from source
 
-The current source archive is published as the `subwatch-source` artifact in the latest successful GitHub Actions run. The archive is reconstructed and verified by CI from the tracked source payload before extraction.
+The repository includes the current source archive as `subwatch-source.tar.gz`; CI verifies it and also publishes it as the `subwatch-source` artifact.
 
 ```bash
 mkdir -p subwatch-source
