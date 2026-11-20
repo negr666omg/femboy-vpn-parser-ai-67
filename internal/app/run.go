@@ -109,6 +109,13 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return fmt.Errorf("network interface %q exists but is DOWN", opts.Interface)
 		}
 		fmt.Fprintf(stdout, "[network] sing-box outbound binding: %s (UP)\n", it.Name)
+		if mark, ok, markErr := core.DetectPolicyBypassMark(); markErr != nil {
+			fmt.Fprintf(stdout, "[network] policy bypass mark detection unavailable: %v\n", markErr)
+		} else if ok {
+			fmt.Fprintf(stdout, "[network] detected direct-routing mark: 0x%X (will be applied to sing-box outbound)\n", mark)
+		} else {
+			fmt.Fprintln(stdout, "[network] no explicit policy-routing bypass mark found; interface binding only")
+		}
 	} else {
 		fmt.Fprintln(stdout, "[network] sing-box outbound binding: automatic (system routing)")
 	}
