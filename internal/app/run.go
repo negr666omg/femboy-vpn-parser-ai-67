@@ -108,7 +108,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		if it.Flags&net.FlagUp == 0 {
 			return fmt.Errorf("network interface %q exists but is DOWN", opts.Interface)
 		}
-		fmt.Fprintf(stdout, "[network] sing-box outbound binding: %s (UP)\\n", it.Name)
+		fmt.Fprintf(stdout, "[network] sing-box outbound binding: %s (UP)\n", it.Name)
 	} else {
 		fmt.Fprintln(stdout, "[network] sing-box outbound binding: automatic (system routing)")
 	}
