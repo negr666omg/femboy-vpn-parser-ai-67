@@ -14,6 +14,13 @@ jobs:
         with:
           go-version: '1.23.x'
           cache: false
+      - name: Publish source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: subwatch-source
+          path: subwatch-source.tar.gz
+          if-no-files-found: error
+          retention-days: 30
       - name: Extract source
         run: mkdir -p src && tar -xzf subwatch-source.tar.gz -C src
       - name: Test
