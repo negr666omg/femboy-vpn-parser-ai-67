@@ -1,0 +1,3 @@
+# One subscription URL, local file path, or single share link per line.
+# https://example.net/subscription
+# ./my-subscription.txt

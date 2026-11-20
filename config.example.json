@@ -1,0 +1,47 @@
+{
+  "network": {
+    "interface": "auto"
+  },
+  "sources": {
+    "file": "sources.txt"
+  },
+  "protocols": {
+    "enabled": ["vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"]
+  },
+  "url_test": {
+    "url": "https://www.gstatic.com/generate_204",
+    "concurrency": 15,
+    "timeout": "10s"
+  },
+  "speed_test": {
+    "concurrency": 4,
+    "timeout": "30s",
+    "min_download_mbps": 8,
+    "min_upload_mbps": 8,
+    "download_bytes": 2097152,
+    "upload_bytes": 2097152,
+    "download_url": "https://speed.cloudflare.com/__down?bytes={bytes}",
+    "upload_url": "https://speed.cloudflare.com/__up"
+  },
+  "service_check": {
+    "concurrency": 4,
+    "timeout": "25s",
+    "lookup_ip": false
+  },
+  "output": {
+    "directory": "out",
+    "split_by_protocol": true,
+    "subscription_text": true
+  },
+  "remote_upload": {
+    "enabled": false,
+    "method": "sftp",
+    "host": "67.67.67.676",
+    "port": 22,
+    "username": "ubuntu",
+    "auth": "private_key",
+    "private_key": "~/Downloads/nigger.key",
+    "password": "",
+    "remote_directory": "/home/ubuntu/oklol/pidarasy"
+  }
+}

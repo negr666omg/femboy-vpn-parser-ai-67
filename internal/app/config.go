@@ -1,0 +1,339 @@
+package app
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type Options struct {
+	Sources            string
+	OutDir             string
+	Interface          string
+	CorePath           string
+	Protocols          []string
+	URLConcurrency     int
+	SpeedConcurrency   int
+	ServiceConcurrency int
+	URLTimeout         time.Duration
+	SpeedTimeout       time.Duration
+	ServiceTimeout     time.Duration
+	URL                string
+	SpeedDownloadURL   string
+	SpeedUploadURL     string
+	DownloadBytes      int64
+	UploadBytes        int64
+	MinDownload        float64
+	MinUpload          float64
+	SplitByProtocol    bool
+	WriteText          bool
+	LookupIP           bool
+	RemoteUpload       RemoteUploadOptions
+}
+
+type RemoteUploadOptions struct {
+	Enabled         bool
+	Method          string
+	Host            string
+	Port            int
+	Username        string
+	Auth            string
+	PrivateKey      string
+	Password        string
+	RemoteDirectory string
+}
+
+type fileConfig struct {
+	Network struct {
+		Interface string `json:"interface"`
+	} `json:"network"`
+	Sources struct {
+		File string `json:"file"`
+	} `json:"sources"`
+	Protocols struct {
+		Enabled []string `json:"enabled"`
+	} `json:"protocols"`
+	URLTest struct {
+		URL         string `json:"url"`
+		Concurrency int    `json:"concurrency"`
+		Timeout     string `json:"timeout"`
+	} `json:"url_test"`
+	SpeedTest struct {
+		Concurrency   int      `json:"concurrency"`
+		Timeout       string   `json:"timeout"`
+		MinDownload   *float64 `json:"min_download_mbps"`
+		MinUpload     *float64 `json:"min_upload_mbps"`
+		DownloadBytes int64    `json:"download_bytes"`
+		UploadBytes   int64    `json:"upload_bytes"`
+		DownloadURL   string   `json:"download_url"`
+		UploadURL     string   `json:"upload_url"`
+	} `json:"speed_test"`
+	ServiceCheck struct {
+		Concurrency int    `json:"concurrency"`
+		Timeout     string `json:"timeout"`
+		LookupIP    *bool  `json:"lookup_ip"`
+	} `json:"service_check"`
+	RemoteUpload struct {
+		Enabled         bool   `json:"enabled"`
+		Method          string `json:"method"`
+		Host            string `json:"host"`
+		Port            int    `json:"port"`
+		Username        string `json:"username"`
+		Auth            string `json:"auth"`
+		PrivateKey      string `json:"private_key"`
+		Password        string `json:"password"`
+		RemoteDirectory string `json:"remote_directory"`
+	} `json:"remote_upload"`
+	Output struct {
+		Directory        string `json:"directory"`
+		SplitByProtocol  bool   `json:"split_by_protocol"`
+		SubscriptionText *bool  `json:"subscription_text"`
+	} `json:"output"`
+}
+
+func DefaultOptions() Options {
+	return Options{
+		Sources: "sources.txt", OutDir: "out", Interface: "auto",
+		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
+		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4,
+		URLTimeout: 12 * time.Second, SpeedTimeout: 30 * time.Second,
+		ServiceTimeout:   25 * time.Second,
+		URL:              "https://www.gstatic.com/generate_204",
+		SpeedDownloadURL: "https://speed.cloudflare.com/__down?bytes={bytes}",
+		SpeedUploadURL:   "https://speed.cloudflare.com/__up",
+		DownloadBytes:    2 << 20, UploadBytes: 2 << 20,
+		MinDownload: 8, MinUpload: 8, WriteText: true,
+	}
+}
+
+func LoadOptions(path string) (Options, error) {
+	opts := DefaultOptions()
+	if strings.TrimSpace(path) == "" {
+		return opts, nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := writeDefaultIfMissing(path, ExampleConfig()); err != nil {
+			return opts, fmt.Errorf("create config %s: %w", path, err)
+		}
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return opts, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg fileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return opts, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if cfg.Network.Interface != "" {
+		opts.Interface = cfg.Network.Interface
+	}
+	if cfg.Sources.File != "" {
+		opts.Sources = cfg.Sources.File
+	}
+	if !filepath.IsAbs(opts.Sources) {
+		opts.Sources = filepath.Join(filepath.Dir(path), opts.Sources)
+	}
+	if len(cfg.Protocols.Enabled) > 0 {
+		opts.Protocols = normalizeProtocols(cfg.Protocols.Enabled)
+	}
+	if cfg.URLTest.URL != "" {
+		opts.URL = cfg.URLTest.URL
+	}
+	if cfg.URLTest.Concurrency > 0 {
+		opts.URLConcurrency = cfg.URLTest.Concurrency
+	}
+	if cfg.URLTest.Timeout != "" {
+		d, e := time.ParseDuration(cfg.URLTest.Timeout)
+		if e != nil || d <= 0 {
+			return opts, fmt.Errorf("url_test.timeout must be a positive duration: %q", cfg.URLTest.Timeout)
+		}
+		opts.URLTimeout = d
+	}
+	if cfg.SpeedTest.Concurrency > 0 {
+		opts.SpeedConcurrency = cfg.SpeedTest.Concurrency
+	}
+	if cfg.SpeedTest.Timeout != "" {
+		d, e := time.ParseDuration(cfg.SpeedTest.Timeout)
+		if e != nil || d <= 0 {
+			return opts, fmt.Errorf("speed_test.timeout must be a positive duration: %q", cfg.SpeedTest.Timeout)
+		}
+		opts.SpeedTimeout = d
+	}
+	if cfg.SpeedTest.MinDownload != nil {
+		opts.MinDownload = *cfg.SpeedTest.MinDownload
+	}
+	if cfg.SpeedTest.MinUpload != nil {
+		opts.MinUpload = *cfg.SpeedTest.MinUpload
+	}
+	if cfg.SpeedTest.DownloadBytes > 0 {
+		opts.DownloadBytes = cfg.SpeedTest.DownloadBytes
+	}
+	if cfg.SpeedTest.UploadBytes > 0 {
+		opts.UploadBytes = cfg.SpeedTest.UploadBytes
+	}
+	if cfg.SpeedTest.DownloadURL != "" {
+		opts.SpeedDownloadURL = cfg.SpeedTest.DownloadURL
+	}
+	if cfg.SpeedTest.UploadURL != "" {
+		opts.SpeedUploadURL = cfg.SpeedTest.UploadURL
+	}
+	if cfg.ServiceCheck.Concurrency > 0 {
+		opts.ServiceConcurrency = cfg.ServiceCheck.Concurrency
+	}
+	if cfg.ServiceCheck.Timeout != "" {
+		d, e := time.ParseDuration(cfg.ServiceCheck.Timeout)
+		if e != nil || d <= 0 {
+			return opts, fmt.Errorf("service_check.timeout must be a positive duration: %q", cfg.ServiceCheck.Timeout)
+		}
+		opts.ServiceTimeout = d
+	}
+	if cfg.ServiceCheck.LookupIP != nil {
+		opts.LookupIP = *cfg.ServiceCheck.LookupIP
+	}
+	if cfg.RemoteUpload.Enabled {
+		r := cfg.RemoteUpload
+		if r.Method == "" {
+			r.Method = "sftp"
+		}
+		if r.Port == 0 {
+			r.Port = 22
+		}
+		if r.Auth == "" {
+			r.Auth = "private_key"
+		}
+		if r.Host == "" || r.Username == "" || r.RemoteDirectory == "" {
+			return opts, fmt.Errorf("remote_upload requires host, username and remote_directory")
+		}
+		if r.Method != "sftp" {
+			return opts, fmt.Errorf("remote_upload.method must be sftp")
+		}
+		if r.Auth != "private_key" && r.Auth != "password" {
+			return opts, fmt.Errorf("remote_upload.auth must be private_key or password")
+		}
+		if r.Auth == "private_key" && r.PrivateKey == "" {
+			r.PrivateKey = "~/.ssh/id_ed25519"
+		}
+		if r.Auth == "password" && r.Password == "" {
+			return opts, fmt.Errorf("remote_upload.password is required when auth=password")
+		}
+		if strings.HasPrefix(r.PrivateKey, "~/") {
+			if home, e := os.UserHomeDir(); e == nil {
+				r.PrivateKey = filepath.Join(home, r.PrivateKey[2:])
+			}
+		}
+		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory}
+	}
+	if cfg.Output.Directory != "" {
+		opts.OutDir = cfg.Output.Directory
+	}
+	opts.SplitByProtocol = cfg.Output.SplitByProtocol
+	if cfg.Output.SubscriptionText != nil {
+		opts.WriteText = *cfg.Output.SubscriptionText
+	}
+
+	// Make a starter source list on first run so the next error is actionable.
+	if err := writeDefaultIfMissing(opts.Sources, "# One subscription URL, local file path, or single share link per line.\n# https://example.net/subscription\n# ./my-subscription.txt\n"); err != nil {
+		return opts, fmt.Errorf("create sources file %s: %w", opts.Sources, err)
+	}
+	return opts, nil
+}
+
+func writeDefaultIfMissing(path, content string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("empty path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	return f.Close()
+}
+
+func normalizeProtocols(protocols []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(protocols))
+	for _, p := range protocols {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "shadowsocks" {
+			p = "ss"
+		}
+		if p == "hy2" {
+			p = "hysteria2"
+		}
+		if p == "socks5" {
+			p = "socks"
+		}
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func ExampleConfig() string {
+	return `{
+  "network": {
+    "interface": "auto"
+  },
+  "sources": {
+    "file": "sources.txt"
+  },
+  "protocols": {
+    "enabled": ["vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"]
+  },
+  "url_test": {
+    "url": "https://www.gstatic.com/generate_204",
+    "concurrency": 8,
+    "timeout": "12s"
+  },
+  "speed_test": {
+    "concurrency": 2,
+    "timeout": "30s",
+    "min_download_mbps": 8,
+    "min_upload_mbps": 8,
+    "download_bytes": 2097152,
+    "upload_bytes": 2097152,
+    "download_url": "https://speed.cloudflare.com/__down?bytes={bytes}",
+    "upload_url": "https://speed.cloudflare.com/__up"
+  },
+  "service_check": {
+    "concurrency": 4,
+    "timeout": "25s",
+    "lookup_ip": false
+  },
+  "output": {
+    "directory": "out",
+    "split_by_protocol": true,
+    "subscription_text": true
+  },
+  "remote_upload": {
+    "enabled": false,
+    "method": "sftp",
+    "host": "79.72.16.241",
+    "port": 22,
+    "username": "ubuntu",
+    "auth": "private_key",
+    "private_key": "~/.ssh/id_ed25519",
+    "password": "",
+    "remote_directory": "/home/ubuntu/oklol/pidarasy"
+  }
+}
+`
+}
