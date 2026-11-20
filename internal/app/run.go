@@ -1007,7 +1007,7 @@ func lookupCountry(ctx context.Context, client *http.Client, endpoint string) st
 
 func countryFlag(code string) string {
 	if len(code) != 2 || code[0] < 65 || code[0] > 90 || code[1] < 65 || code[1] > 90 { return "" }
-	return string([]rune{rune(0x1F1E6 + code[0] - 65), rune(0x1F1E6 + code[1] - 65)})
+	return string([]rune{rune(0x1F1E6 + int(code[0]) - 65), rune(0x1F1E6 + int(code[1]) - 65)})
 }
 
 func formatMbps(value float64, decimals int) string {
