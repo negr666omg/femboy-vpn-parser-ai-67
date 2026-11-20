@@ -100,6 +100,7 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 	}
 
 	downloadCtx, downloadCancel := context.WithCancel(ctx)
+	defer downloadCancel()
 	dreq, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return 0, 0, err
