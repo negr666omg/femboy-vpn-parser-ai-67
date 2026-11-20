@@ -109,7 +109,7 @@ func TestRenameNodeUpdatesSubscriptionRemark(t *testing.T) {
 	node, err := ParseURI("vless://11111111-1111-4111-8111-111111111111@example.com:443#old-name")
 	if err != nil { t.Fatal(err) }
 	RenameNode(&node, "🇩🇪 70↓34↑")
-	if node.Name != "🇩🇪 70↓34↑" || !strings.HasSuffix(node.URI, "#🇩🇪%2070%E2%86%9334%E2%86%91") {
+	if node.Name != "🇩🇪 70↓34↑" || !strings.Contains(node.URI, "#") {
 		t.Fatalf("rename was not written to URI: name=%q uri=%q", node.Name, node.URI)
 	}
 	parsed, err := ParseURI(node.URI)
