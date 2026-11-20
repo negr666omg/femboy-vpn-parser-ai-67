@@ -200,7 +200,7 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 		// unmarked traffic through its TUN table before the main table is
 		// consulted. If an explicit "not fwmark" exception exists, apply
 		// that mark to sing-box outbound sockets as well as binding the NIC.
-		if mark, ok, detectErr := detectPolicyBypassMark(); detectErr == nil && ok {
+		if mark, ok, detectErr := DetectPolicyBypassMark(); detectErr == nil && ok {
 			out["routing_mark"] = mark
 		} else if detectErr != nil {
 			// Keep ordinary interface binding usable when iproute2 is absent.
@@ -263,12 +263,12 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 	}
 }
 
-// detectPolicyBypassMark finds an explicit Linux policy rule of the form
+// DetectPolicyBypassMark finds an explicit Linux policy rule of the form
 // "not from all fwmark VALUE/MASK lookup TABLE". The VALUE is the mark
 // excluded from the VPN table and is therefore the appropriate mark for
 // direct-bound sing-box sockets. It deliberately does not guess from ordinary
 // fwmark rules.
-func detectPolicyBypassMark() (uint32, bool, error) {
+func DetectPolicyBypassMark() (uint32, bool, error) {
 	ipPath, err := exec.LookPath("ip")
 	if err != nil {
 		return 0, false, err
