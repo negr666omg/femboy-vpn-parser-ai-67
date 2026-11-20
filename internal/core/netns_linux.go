@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -25,7 +26,7 @@ type NetworkNamespace struct {
 	resolvDir  string
 }
 
-func NewNetworkNamespace(ctx context.Context, iface string, stdout, stderr *os.File) (*NetworkNamespace, error) {
+func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*NetworkNamespace, error) {
 	if iface == "" || iface == "auto" {
 		return nil, nil
 	}
