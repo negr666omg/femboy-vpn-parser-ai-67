@@ -516,9 +516,9 @@ func TestMergeResultsKeepsUpdatedURIAfterRename(t *testing.T) {
 	}
 }
 
-func TestFormatMbpsPrecision(t *testing.T) {
+func TestFormatMbpsRoundsToWholeNumbers(t *testing.T) {
 	cases := []struct{ value float64; decimals int; want string }{
-		{70, 0, "70"}, {70, 1, "70"}, {0.5, 1, "0.5"}, {0.55, 2, "0.55"}, {0.5, 2, "0.5"},
+		{70, 0, "70"}, {70.4, 2, "70"}, {70.5, 1, "71"}, {0.4, 2, "0"}, {0.5, 1, "1"}, {0.55, 2, "1"},
 	}
 	for _, tc := range cases {
 		if got := formatMbps(tc.value, tc.decimals); got != tc.want { t.Errorf("formatMbps(%v,%d)=%q want %q", tc.value, tc.decimals, got, tc.want) }
