@@ -14,6 +14,7 @@ type Options struct {
 	Sources            string
 	OutDir             string
 	Interface          string
+	NetworkNamespace   string
 	CorePath           string
 	Protocols          []string
 	URLConcurrency     int
