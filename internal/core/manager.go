@@ -187,6 +187,13 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 	}
 	out["tag"] = "proxy"
 	if iface != "" && iface != "auto" {
+		it, lookupErr := net.InterfaceByName(iface)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("network interface %q not found: %w", iface, lookupErr)
+		}
+		if it.Flags&net.FlagUp == 0 {
+			return nil, fmt.Errorf("network interface %q exists but is DOWN", iface)
+		}
 		out["bind_interface"] = iface
 	}
 	cfg := map[string]any{"log": map[string]any{"level": "error"}, "inbounds": []any{map[string]any{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": port}}, "outbounds": []any{out, map[string]any{"type": "direct", "tag": "direct"}}, "route": map[string]any{"final": "proxy"}}
