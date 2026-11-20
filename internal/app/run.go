@@ -1233,7 +1233,7 @@ func writeReport(path string, nodes []sub.Node) error {
 	w := csv.NewWriter(f)
 	_ = w.Write([]string{"name", "protocol", "uri", "url_passed", "url_latency_ms", "url_error", "speed_passed", "download_mbps", "upload_mbps", "speed_error", "gemini_status", "gemini_note", "gemini_region", "service_error", "exit_ip", "country", "asn", "org", "ip_type", "ip_flags"})
 	for _, n := range nodes {
-		_ = w.Write([]string{n.Name, protocolOf(n), n.URI, strconv.FormatBool(n.URLPassed), strconv.FormatInt(n.URLLatencyMS, 10), n.URLError, strconv.FormatBool(n.SpeedPassed), fmt.Sprintf("%.3f", n.DownloadMbps), fmt.Sprintf("%.3f", n.UploadMbps), n.SpeedError, n.GeminiStatus, n.GeminiNote, n.GeminiRegion, n.ServiceError, n.ExitIP, n.Country, n.ASN, n.Org, n.IPType, flagsJSON(n.IPFlags)})
+		_ = w.Write([]string{n.Name, protocolOf(n), n.URI, strconv.FormatBool(n.URLPassed), strconv.FormatInt(n.URLLatencyMS, 10), n.URLError, strconv.FormatBool(n.SpeedPassed), fmt.Sprintf("%.0f", n.DownloadMbps), fmt.Sprintf("%.0f", n.UploadMbps), n.SpeedError, n.GeminiStatus, n.GeminiNote, n.GeminiRegion, n.ServiceError, n.ExitIP, n.Country, n.ASN, n.Org, n.IPType, flagsJSON(n.IPFlags)})
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
