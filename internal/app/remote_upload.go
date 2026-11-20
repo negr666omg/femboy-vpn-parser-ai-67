@@ -60,7 +60,7 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 		sftpArgs = append(sftpArgs, "-i", opts.PrivateKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes")
 	}
 	sshArgs = append(sshArgs, target, "mkdir -p -- "+shellQuote(opts.RemoteDirectory))
-	sftpArgs = append(sftpArgs, "-b", "-")
+	sftpArgs = append(sftpArgs, "-b", "-", target)
 
 	run := func(name string, args []string, input string) error {
 		cmd := exec.CommandContext(ctx, name, args...)
