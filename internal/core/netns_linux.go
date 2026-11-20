@@ -89,7 +89,7 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	if err != nil || !strings.Contains(route, "default") {
 		return fail(fmt.Errorf("selected interface %s did not provide a default route in the isolated network", iface))
 	}
-	fmt.Fprintf(os.Stdout, "[network] isolated Linux namespace %s is online via %s (%s)\n", ns.Name, iface, strings.TrimSpace(route))
+	fmt.Fprintf(output, "[network] isolated Linux namespace %s is online via %s (%s)\n", ns.Name, iface, strings.TrimSpace(route))
 	return ns, nil
 }
 
