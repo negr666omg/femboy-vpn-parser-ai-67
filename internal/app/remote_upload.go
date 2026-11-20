@@ -17,6 +17,30 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 	if !opts.Enabled {
 		return nil
 	}
+	fmt.Fprintf(stdout, "[UPLOAD] Enabled; method=SFTP, auth=%s, target=%s@%s:%d, remote_dir=%s\\n", opts.Auth, opts.Username, opts.Host, opts.Port, opts.RemoteDirectory)
+	for _, name := range []string{"ssh", "sftp"} {
+		if path, lookErr := exec.LookPath(name); lookErr != nil {
+			return fmt.Errorf("required command %q not found in PATH: %w", name, lookErr)
+		} else {
+			fmt.Fprintf(stdout, "[UPLOAD] Found %s: %s\\n", name, path)
+		}
+	}
+	if opts.Auth == "password" {
+		if path, lookErr := exec.LookPath("sshpass"); lookErr != nil {
+			return fmt.Errorf("password authentication requires sshpass, but it was not found in PATH: %w", lookErr)
+		} else {
+			fmt.Fprintf(stdout, "[UPLOAD] Found sshpass: %s\\n", path)
+		}
+	} else if opts.Auth == "private_key" {
+		info, statErr := os.Stat(opts.PrivateKey)
+		if statErr != nil {
+			return fmt.Errorf("cannot access SSH private key %q: %w", opts.PrivateKey, statErr)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("SSH private key path %q is a directory", opts.PrivateKey)
+		}
+		fmt.Fprintf(stdout, "[UPLOAD] SSH private key found: %s\\n", opts.PrivateKey)
+	}
 	files, err := filepath.Glob(filepath.Join(outDir, "*.txt"))
 	if err != nil {
 		return err
@@ -29,8 +53,8 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 
 	target := opts.Username + "@" + opts.Host
 	port := fmt.Sprint(opts.Port)
-	sshArgs := []string{"-p", port, "-o", "StrictHostKeyChecking=accept-new"}
-	sftpArgs := []string{"-P", port, "-o", "StrictHostKeyChecking=accept-new"}
+	sshArgs := []string{"-p", port, "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"}
+	sftpArgs := []string{"-P", port, "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2"}
 	if opts.Auth == "private_key" {
 		sshArgs = append(sshArgs, "-i", opts.PrivateKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes")
 		sftpArgs = append(sftpArgs, "-i", opts.PrivateKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes")
@@ -58,13 +82,15 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 		return nil
 	}
 
-	fmt.Fprintf(stdout, "[UPLOAD] Connecting to %s:%s via SFTP...\n", opts.Host, port)
+	fmt.Fprintf(stdout, "[UPLOAD] Preparing remote directory and connecting to %s:%s...\\n", opts.Host, port)
 	if err := run("ssh", sshArgs, ""); err != nil {
 		return fmt.Errorf("prepare remote directory: %w", err)
 	}
 	var batch strings.Builder
 	for _, file := range files {
-		fmt.Fprintf(&batch, "put %s %s\n", sftpQuote(file), sftpQuote(strings.TrimRight(opts.RemoteDirectory, "/")+"/"+filepath.Base(file)))
+		destination := strings.TrimRight(opts.RemoteDirectory, "/") + "/" + filepath.Base(file)
+		fmt.Fprintf(stdout, "[UPLOAD] Queueing %s -> %s\\n", filepath.Base(file), destination)
+		fmt.Fprintf(&batch, "put %s %s\\n", sftpQuote(file), sftpQuote(destination))
 	}
 	if err := run("sftp", sftpArgs, batch.String()); err != nil {
 		return fmt.Errorf("SFTP upload: %w", err)
