@@ -1,0 +1,5 @@
+/subwatch
+/subwatch-*
+/sources.txt
+/out/
+*.log
