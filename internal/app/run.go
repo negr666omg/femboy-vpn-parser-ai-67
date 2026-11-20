@@ -283,7 +283,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 				flag := countryFlag(country)
 				if flag == "" { return fmt.Errorf("GeoIP country lookup failed") }
 				n.Country = country
-				sub.RenameNode(n, fmt.Sprintf("%s %s↓%s↑", flag, formatMbps(down), formatMbps(up)))
+				name := strings.NewReplacer("{flag}", flag, "{download}", formatMbps(down, opts.SpeedDecimals), "{upload}", formatMbps(up, opts.SpeedDecimals)).Replace(opts.NameFormat)
+				if name == opts.NameFormat { return fmt.Errorf("service_check.name_format has no supported placeholders") }
+				sub.RenameNode(n, name)
 				return nil
 			})
 			if geoErr != nil { n.SpeedError = "rename: " + geoErr.Error() }
@@ -1008,8 +1010,8 @@ func countryFlag(code string) string {
 	return string([]rune{rune(0x1F1E6 + code[0] - 65), rune(0x1F1E6 + code[1] - 65)})
 }
 
-func formatMbps(value float64) string {
-	formatted := strconv.FormatFloat(value, 'f', 1, 64)
+func formatMbps(value float64, decimals int) string {
+	formatted := strconv.FormatFloat(value, 'f', decimals, 64)
 	return strings.TrimSuffix(strings.TrimSuffix(formatted, "0"), ".")
 }
 
