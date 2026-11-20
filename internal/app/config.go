@@ -52,6 +52,7 @@ type RemoteUploadOptions struct {
 	PrivateKey      string
 	Password        string
 	RemoteDirectory string
+	Interface       string
 }
 
 type fileConfig struct {
@@ -101,6 +102,7 @@ type fileConfig struct {
 		PrivateKey      string `json:"private_key"`
 		Password        string `json:"password"`
 		RemoteDirectory string `json:"remote_directory"`
+		Interface       string `json:"interface"`
 	} `json:"remote_upload"`
 	Output struct {
 		Directory        string `json:"directory"`
@@ -252,7 +254,7 @@ func LoadOptions(path string) (Options, error) {
 				r.PrivateKey = filepath.Join(home, r.PrivateKey[2:])
 			}
 		}
-		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory}
+		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory, Interface: strings.TrimSpace(r.Interface)}
 	}
 	if cfg.Output.Directory != "" {
 		opts.OutDir = cfg.Output.Directory
@@ -365,7 +367,8 @@ func ExampleConfig() string {
     "auth": "private_key",
     "private_key": "~/.ssh/id_ed25519",
     "password": "",
-    "remote_directory": "/home/ubuntu/oklol/pidarasy"
+    "remote_directory": "/home/ubuntu/oklol/pidarasy",
+    "interface": ""
   }
 }
 `
