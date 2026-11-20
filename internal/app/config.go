@@ -219,6 +219,7 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.ServiceCheck.RenameNodes != nil { opts.RenameNodes = *cfg.ServiceCheck.RenameNodes }
 	if cfg.ServiceCheck.GeoIPURL != "" { opts.GeoIPURL = cfg.ServiceCheck.GeoIPURL }
 	if cfg.ServiceCheck.NameFormat != "" { opts.NameFormat = cfg.ServiceCheck.NameFormat }
+	if opts.NameFormat != "" && !strings.Contains(opts.NameFormat, "{flag}") && !strings.Contains(opts.NameFormat, "{download}") && !strings.Contains(opts.NameFormat, "{upload}") { return opts, fmt.Errorf("service_check.name_format must include {flag}, {download}, or {upload}") }
 	if cfg.ServiceCheck.SpeedDecimals != nil { if *cfg.ServiceCheck.SpeedDecimals < 0 || *cfg.ServiceCheck.SpeedDecimals > 3 { return opts, fmt.Errorf("service_check.speed_decimals must be between 0 and 3") }; opts.SpeedDecimals = *cfg.ServiceCheck.SpeedDecimals }
 	if cfg.RemoteUpload.Enabled {
 		r := cfg.RemoteUpload
