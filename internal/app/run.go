@@ -971,7 +971,7 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 		testCtx, cancel := context.WithTimeout(ctx, opts.SpeedTimeout)
 		defer cancel()
 		var testErr error
-		down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress)
+		down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress, opts.FirstByteTimeout, opts.MaxSpeedDuration, opts.SpeedSampleInterval)
 		return testErr
 	})
 	return down, up, err
