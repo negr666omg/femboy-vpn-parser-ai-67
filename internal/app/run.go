@@ -231,6 +231,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	opts.CorePath = corePath
 	fmt.Fprintf(stdout, "[prepare] sing-box ready: %s\n", corePath)
+	if opts.Interface != "auto" {
+		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
+		if nsErr != nil { return fmt.Errorf("prepare isolated network: %w", nsErr) }
+		if ns != nil { defer ns.Close(); opts.NetworkNamespace = ns.Name }
+	}
 
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
 	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
@@ -1051,7 +1056,7 @@ func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, 
 func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, *http.Client) error) error {
 	startCtx, cancel := context.WithTimeout(parent, timeout+8*time.Second)
 	defer cancel()
-	inst, err := core.Start(startCtx, opts.CorePath, n.Outbound, opts.Interface)
+	inst, err := core.Start(startCtx, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
