@@ -277,6 +277,17 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return
 		}
 		n.SpeedPassed = true
+		if opts.RenameNodes {
+			geoErr := withNodeClient(stageCtx, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
+				country := lookupCountry(ctx, client, opts.GeoIPURL)
+				flag := countryFlag(country)
+				if flag == "" { return fmt.Errorf("GeoIP country lookup failed") }
+				n.Country = country
+				sub.RenameNode(n, fmt.Sprintf("%s %s↓%s↑", flag, formatMbps(down), formatMbps(up)))
+				return nil
+			})
+			if geoErr != nil { n.SpeedError = "rename: " + geoErr.Error() }
+		}
 		live(*n, speedLiveDetail(*n, "PASS"))
 	}, nil)
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
@@ -975,6 +986,30 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 		return testErr
 	})
 	return down, up, err
+}
+
+
+func lookupCountry(ctx context.Context, client *http.Client, endpoint string) string {
+	if endpoint == "" { endpoint = "https://ipwho.is/" }
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil { return "" }
+	resp, err := client.Do(req)
+	if err != nil { return "" }
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 { return "" }
+	var data map[string]any
+	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&data) != nil { return "" }
+	code, _ := data["country_code"].(string)
+	return strings.ToUpper(strings.TrimSpace(code))
+}
+
+func countryFlag(code string) string {
+	if len(code) != 2 || code[0] < 65 || code[0] > 90 || code[1] < 65 || code[1] > 90 { return "" }
+	return string([]rune{rune(0x1F1E6 + code[0] - 65), rune(0x1F1E6 + code[1] - 65)})
+}
+
+func formatMbps(value float64) string {
+	return strconv.FormatFloat(value, 'f', 1, 64)
 }
 
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
