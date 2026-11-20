@@ -1012,7 +1012,8 @@ func countryFlag(code string) string {
 
 func formatMbps(value float64, decimals int) string {
 	formatted := strconv.FormatFloat(value, 'f', decimals, 64)
-	return strings.TrimSuffix(strings.TrimSuffix(formatted, "0"), ".")
+	if strings.Contains(formatted, ".") { formatted = strings.TrimSuffix(strings.TrimSuffix(formatted, "0"), ".") }
+	return formatted
 }
 
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
