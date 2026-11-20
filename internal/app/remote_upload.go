@@ -66,7 +66,7 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 		}
 		sshArgs = append(sshArgs, "-o", "BindInterface="+opts.Interface)
 		sftpArgs = append(sftpArgs, "-o", "BindInterface="+opts.Interface)
-		fmt.Fprintf(stdout, "[UPLOAD] Binding SSH/SFTP to interface: %s\\n", opts.Interface)
+		fmt.Fprintf(stdout, "[UPLOAD] Binding SSH/SFTP to interface: %s\n", opts.Interface)
 	} else {
 		fmt.Fprintln(stdout, "[UPLOAD] SSH/SFTP interface: automatic (system routing)")
 	}
