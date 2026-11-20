@@ -703,7 +703,7 @@ func urlLiveDetail(n sub.Node) string {
 }
 
 func speedLiveDetail(n sub.Node, state string) string {
-	return fmt.Sprintf("download: %.2f Mbps | upload: %.2f Mbps | %s", n.DownloadMbps, n.UploadMbps, cleanLiveText(state))
+	return fmt.Sprintf("download: %.0f Mbps | upload: %.0f Mbps | %s", n.DownloadMbps, n.UploadMbps, cleanLiveText(state))
 }
 
 func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
@@ -966,10 +966,10 @@ func runURLTest(parent context.Context, n sub.Node, opts Options) (bool, int64, 
 func speedThresholdError(download, upload, minDownload, minUpload float64) string {
 	var reasons []string
 	if download < minDownload {
-		reasons = append(reasons, fmt.Sprintf("download %.2f < %.2f Mbps", download, minDownload))
+		reasons = append(reasons, fmt.Sprintf("download %.0f < %.0f Mbps", download, minDownload))
 	}
 	if upload < minUpload {
-		reasons = append(reasons, fmt.Sprintf("upload %.2f < %.2f Mbps", upload, minUpload))
+		reasons = append(reasons, fmt.Sprintf("upload %.0f < %.0f Mbps", upload, minUpload))
 	}
 	return strings.Join(reasons, "; ")
 }
@@ -1010,10 +1010,9 @@ func countryFlag(code string) string {
 	return string([]rune{rune(0x1F1E6 + int(code[0]) - 65), rune(0x1F1E6 + int(code[1]) - 65)})
 }
 
-func formatMbps(value float64, decimals int) string {
-	formatted := strconv.FormatFloat(value, 'f', decimals, 64)
-	if strings.Contains(formatted, ".") { formatted = strings.TrimSuffix(strings.TrimSuffix(formatted, "0"), ".") }
-	return formatted
+func formatMbps(value float64, _ int) string {
+	// Keep Mbps values readable and consistent in names and summaries.
+	return strconv.FormatFloat(value, 'f', 0, 64)
 }
 
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
