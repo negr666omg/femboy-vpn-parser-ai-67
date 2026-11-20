@@ -25,6 +25,6 @@ chmod +x subwatch
 
 The run pipeline merges sources, deduplicates outbound configs, performs an HTTP URL test, then Cloudflare download/upload tests, then Throne-style public Gemini Service Check classification. Only Gemini `available` results appear in `gemini-full.txt`; `partial`, `unknown`, `blocked` and `failed` do not pass. This is only a public network-level page check and does not authenticate or test account eligibility.
 
-SubWatch supports `--concurrency`, `--timeout`, `--url`, `--min-download`, `--min-upload`, `--download-bytes`, `--upload-bytes`, `--interface`, `--out`, and `--core-path`. Default minimum upload and download rates are 5 Mbps. See README inside the source archive for details and known limitations.
+SubWatch supports `--concurrency`, `--timeout`, `--url`, `--min-download`, `--min-upload`, `--download-bytes`, `--upload-bytes`, `--interface`, `--out`, and `--core-path`. Default minimum upload and download rates are 5 Mbps. See this README for usage details and known limitations.
 
 On Linux amd64/arm64, if sing-box is not installed, the binary downloads the pinned v1.14.4 archive and verifies its SHA-256 before use. The current Gemini HTTP client matches Throne's URL, cookie, headers and page-state rules but uses Go's standard TLS stack instead of Throne's Chrome uTLS fingerprint; uncertain responses are never promoted to available.
