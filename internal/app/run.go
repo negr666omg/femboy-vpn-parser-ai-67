@@ -1213,7 +1213,10 @@ func writeAtomic(path string, data []byte) error {
 			os.Remove(tmpName)
 		}
 	}()
-	if err := tmp.Chmod(0600); err != nil {
+	// Subscription files are exported and uploaded for HTTP serving. Keep their
+	// contents readable by the web server while the private output directory
+	// itself remains restricted to the SubWatch user.
+	if err := tmp.Chmod(0644); err != nil {
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
