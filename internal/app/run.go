@@ -101,9 +101,16 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		opts.Interface = "auto"
 	}
 	if opts.Interface != "auto" {
-		if _, err := net.InterfaceByName(opts.Interface); err != nil {
-			return fmt.Errorf("network interface %q not found (run 'sw interfaces')", opts.Interface)
+		it, err := net.InterfaceByName(opts.Interface)
+		if err != nil {
+			return fmt.Errorf("network interface %q not found (run 'sw interfaces'): %w", opts.Interface, err)
 		}
+		if it.Flags&net.FlagUp == 0 {
+			return fmt.Errorf("network interface %q exists but is DOWN", opts.Interface)
+		}
+		fmt.Fprintf(stdout, "[network] sing-box outbound binding: %s (UP)\\n", it.Name)
+	} else {
+		fmt.Fprintln(stdout, "[network] sing-box outbound binding: automatic (system routing)")
 	}
 	if opts.Sources == "" {
 		opts.Sources = "sources.txt"
@@ -214,7 +221,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return fmt.Errorf("no nodes match enabled protocols: %s", strings.Join(opts.Protocols, ", "))
 	}
 	fmt.Fprintf(stdout, "Deduplicated: %d unique | %d duplicates | enabled protocols: %s | nodes to test: %d\n", len(unique), duplicates, strings.Join(opts.Protocols, ","), len(selected))
-	fmt.Fprintf(stdout, "Interface: %s | URL concurrency: %d | speed concurrency: %d | service concurrency: %d\n", opts.Interface, opts.URLConcurrency, opts.SpeedConcurrency, opts.ServiceConcurrency)
+	fmt.Fprintf(stdout, "Proxy interface: %s | URL concurrency: %d | speed concurrency: %d | service concurrency: %d\n", opts.Interface, opts.URLConcurrency, opts.SpeedConcurrency, opts.ServiceConcurrency)
 	fmt.Fprintf(stdout, "Speed payload: %.2f/%.2f MiB | minimum DL/UL: %.2f/%.2f Mbps | download URL: %s | upload URL: %s\n", float64(opts.DownloadBytes)/(1<<20), float64(opts.UploadBytes)/(1<<20), opts.MinDownload, opts.MinUpload, opts.SpeedDownloadURL, opts.SpeedUploadURL)
 
 	fmt.Fprintln(stdout, "[prepare] Checking sing-box; first run may download the verified core...")
