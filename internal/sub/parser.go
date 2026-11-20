@@ -525,3 +525,14 @@ func parseHTTP(u *url.URL) (map[string]any, error) {
 	}
 	return o, nil
 }
+
+// RenameNode updates both the exported node name and the URI remark consumed by subscription clients.
+func RenameNode(n *Node, name string) {
+	if n == nil || strings.TrimSpace(name) == "" { return }
+	u, err := url.Parse(n.URI)
+	if err != nil { return }
+	u.Fragment = name
+	n.URI = u.String()
+	n.Name = name
+	n.Outbound["_name"] = name
+}
