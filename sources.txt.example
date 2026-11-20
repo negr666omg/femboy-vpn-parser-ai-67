@@ -1,0 +1,4 @@
+# Copy this file to sources.txt and add one source per line.
+# An entry may be a subscription URL, a local file path, or a single share link.
+# https://example.net/subscription
+# ./my-subscription.txt
