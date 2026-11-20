@@ -1,0 +1,41 @@
+{
+  "network": {
+    "interface": "auto"
+  },
+  "sources": {
+    "file": "sources.txt"
+  },
+  "protocols": {
+    "enabled": [
+      "vless",
+      "vmess",
+      "trojan",
+      "ss",
+      "hysteria2",
+      "tuic"
+    ]
+  },
+  "url_test": {
+    "url": "https://www.gstatic.com/generate_204",
+    "concurrency": 8,
+    "timeout": "12s"
+  },
+  "speed_test": {
+    "concurrency": 4,
+    "timeout": "60s",
+    "min_download_mbps": 5,
+    "min_upload_mbps": 5,
+    "download_bytes": 8388608,
+    "upload_bytes": 4194304
+  },
+  "service_check": {
+    "concurrency": 4,
+    "timeout": "25s",
+    "lookup_ip": false
+  },
+  "output": {
+    "directory": "out",
+    "split_by_protocol": true,
+    "subscription_text": true
+  }
+}
