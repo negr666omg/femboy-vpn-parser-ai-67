@@ -206,7 +206,8 @@ func SpeedTestWithProgress(ctx context.Context, client *http.Client, downloadURL
 			if rate > peakUpload { peakUpload = rate }
 			lastUploadBytes, lastUploadAt = done, now
 			if progress != nil { progress(SpeedProgress{Phase: "upload", CompletedBytes: done, TotalBytes: uploadBytes, DownloadMbps: down, UploadMbps: peakUpload}) }
-		}
+		},
+	}
 	ureq.Body = io.NopCloser(uploadReader)
 	uresp, err := client.Do(ureq)
 	if err != nil {
