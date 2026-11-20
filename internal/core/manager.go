@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"strconv"
 	"time"
 )
 
@@ -196,16 +195,6 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 			return nil, fmt.Errorf("network interface %q exists but is DOWN", iface)
 		}
 		out["bind_interface"] = iface
-		// Throne's TUN mode can install a policy-routing rule that sends
-		// unmarked traffic through its TUN table before the main table is
-		// consulted. If an explicit "not fwmark" exception exists, apply
-		// that mark to sing-box outbound sockets as well as binding the NIC.
-		if mark, ok, detectErr := DetectPolicyBypassMark(); detectErr == nil && ok {
-			out["routing_mark"] = mark
-		} else if detectErr != nil {
-			// Keep ordinary interface binding usable when iproute2 is absent.
-			_ = detectErr
-		}
 	}
 	cfg := map[string]any{"log": map[string]any{"level": "error"}, "inbounds": []any{map[string]any{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": port}}, "outbounds": []any{out, map[string]any{"type": "direct", "tag": "direct"}}, "route": map[string]any{"final": "proxy"}}
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -261,41 +250,6 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 		case <-ticker.C:
 		}
 	}
-}
-
-// DetectPolicyBypassMark finds an explicit Linux policy rule of the form
-// "not from all fwmark VALUE/MASK lookup TABLE". The VALUE is the mark
-// excluded from the VPN table and is therefore the appropriate mark for
-// direct-bound sing-box sockets. It deliberately does not guess from ordinary
-// fwmark rules.
-func DetectPolicyBypassMark() (uint32, bool, error) {
-	ipPath, err := exec.LookPath("ip")
-	if err != nil {
-		return 0, false, err
-	}
-	output, err := exec.Command(ipPath, "-4", "rule", "show").CombinedOutput()
-	if err != nil {
-		return 0, false, fmt.Errorf("read IPv4 policy rules: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.Contains(line, "not from all fwmark ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		for i := 0; i+1 < len(fields); i++ {
-			if fields[i] != "fwmark" {
-				continue
-			}
-			value := strings.SplitN(fields[i+1], "/", 2)[0]
-			parsed, parseErr := strconv.ParseUint(value, 0, 32)
-			if parseErr != nil {
-				return 0, false, fmt.Errorf("parse bypass fwmark %q: %w", value, parseErr)
-			}
-			return uint32(parsed), true, nil
-		}
-	}
-	return 0, false, nil
 }
 
 func (i *Instance) Close() {
