@@ -25,7 +25,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
   "protocols":{"enabled":["vless","shadowsocks"]},
   "url_test":{"url":"https://example.com/204","concurrency":6,"timeout":"9s"},
   "speed_test":{"concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
-  "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json"},
+  "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json","name_format":"{flag} {download}↓{upload}↑","speed_decimals":2},
   "final_check":{"enabled":false,"concurrency":1,"timeout":"8s"},
   "output":{"directory":"results","split_by_protocol":true,"subscription_text":false}
 }`
@@ -48,7 +48,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
 		t.Fatalf("protocol aliases not normalized: %#v", opts.Protocols)
 	}
-	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || !opts.SplitByProtocol || opts.WriteText {
+	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
 	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
@@ -513,5 +513,14 @@ func TestMergeResultsKeepsUpdatedURIAfterRename(t *testing.T) {
 	got := mergeResults([]sub.Node{original}, []sub.Node{original}, []sub.Node{renamed}, []sub.Node{renamed})
 	if len(got) != 1 || got[0].URI != renamed.URI || got[0].Name != renamed.Name {
 		t.Fatalf("renamed URI was lost during merge: %#v", got)
+	}
+}
+
+func TestFormatMbpsPrecision(t *testing.T) {
+	cases := []struct{ value float64; decimals int; want string }{
+		{70, 0, "70"}, {70, 1, "70"}, {0.5, 1, "0.5"}, {0.55, 2, "0.55"}, {0.5, 2, "0.5"},
+	}
+	for _, tc := range cases {
+		if got := formatMbps(tc.value, tc.decimals); got != tc.want { t.Errorf("formatMbps(%v,%d)=%q want %q", tc.value, tc.decimals, got, tc.want) }
 	}
 }
