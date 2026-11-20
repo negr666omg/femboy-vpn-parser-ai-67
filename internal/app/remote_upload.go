@@ -74,7 +74,7 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 		sshArgs = append(sshArgs, "-i", opts.PrivateKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes")
 		sftpArgs = append(sftpArgs, "-i", opts.PrivateKey, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes")
 	}
-	sshArgs = append(sshArgs, target, "mkdir -p -- "+shellQuote(opts.RemoteDirectory))
+	sshArgs = append(sshArgs, target, "mkdir -p -- "+shellQuote(opts.RemoteDirectory)+" && chmod 755 -- "+shellQuote(opts.RemoteDirectory))
 	sftpArgs = append(sftpArgs, "-b", "-", target)
 
 	run := func(name string, args []string, input string) error {
@@ -106,6 +106,9 @@ func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, 
 		destination := strings.TrimRight(opts.RemoteDirectory, "/") + "/" + filepath.Base(file)
 		fmt.Fprintf(stdout, "[UPLOAD] Queueing %s -> %s\n", filepath.Base(file), destination)
 		fmt.Fprintf(&batch, "put %s %s\n", sftpQuote(file), sftpQuote(destination))
+		// Enforce readable permissions on the remote copy even when the SFTP
+		// server preserves restrictive local file modes.
+		fmt.Fprintf(&batch, "chmod 644 %s\n", sftpQuote(destination))
 	}
 	if err := run("sftp", sftpArgs, batch.String()); err != nil {
 		return fmt.Errorf("SFTP upload: %w", err)

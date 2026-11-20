@@ -232,6 +232,13 @@ func TestWriteSubscriptionContainsOnlyProxyURIs(t *testing.T) {
 	if string(got) != want || strings.Contains(string(got), "#profile-") || strings.Contains(string(got), "#announce") {
 		t.Fatalf("unexpected subscription content: %q", got)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("subscription permissions = %04o, want 0644 for web-server readability", got)
+	}
 }
 
 func TestFinalCheckStageRemoved(t *testing.T) {
