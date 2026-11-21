@@ -43,12 +43,19 @@ func ParseDocument(body []byte) ([]Node, int, error) {
 // ParseDocumentWithProgress parses a subscription and periodically reports
 // line-level progress. The callback runs synchronously in the parser goroutine.
 func ParseDocumentWithProgress(body []byte, progress func(processedLines, totalLines, parsedNodes, invalidLines int)) ([]Node, int, error) {
+	nodes, invalidLines, err := ParseDocumentWithDiagnostics(body, progress)
+	return nodes, len(invalidLines), err
+}
+
+// ParseDocumentWithDiagnostics also returns the original non-comment lines
+// that could not be parsed, allowing callers to export invalid proxy entries.
+func ParseDocumentWithDiagnostics(body []byte, progress func(processedLines, totalLines, parsedNodes, invalidLines int)) ([]Node, []string, error) {
 	if len(body) > 8<<20 {
-		return nil, 0, errors.New("source exceeds 8 MiB")
+		return nil, nil, errors.New("source exceeds 8 MiB")
 	}
 	text := strings.TrimSpace(string(body))
 	if text == "" {
-		return nil, 0, errors.New("empty subscription")
+		return nil, nil, errors.New("empty subscription")
 	}
 	if !strings.Contains(text, "://") {
 		decoded, err := decodeBase64(text)
@@ -57,7 +64,7 @@ func ParseDocumentWithProgress(body []byte, progress func(processedLines, totalL
 		}
 	}
 	var nodes []Node
-	invalid := 0
+	var invalidLines []string
 	totalLines := strings.Count(text, "\n") + 1
 	if progress != nil {
 		progress(0, totalLines, 0, 0)
@@ -71,22 +78,22 @@ func ParseDocumentWithProgress(body []byte, progress func(processedLines, totalL
 		if line != "" && !strings.HasPrefix(line, "#") && !(strings.Contains(line, ",") && !strings.Contains(line, "://")) {
 			node, err := ParseURI(line)
 			if err != nil {
-				invalid++
+				invalidLines = append(invalidLines, line)
 			} else {
 				nodes = append(nodes, node)
 			}
 		}
 		if progress != nil && processedLines%128 == 0 {
-			progress(processedLines, totalLines, len(nodes), invalid)
+			progress(processedLines, totalLines, len(nodes), len(invalidLines))
 		}
 	}
 	if progress != nil && processedLines%128 != 0 {
-		progress(processedLines, totalLines, len(nodes), invalid)
+		progress(processedLines, totalLines, len(nodes), len(invalidLines))
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, invalid, err
+		return nil, invalidLines, err
 	}
-	return nodes, invalid, nil
+	return nodes, invalidLines, nil
 }
 
 func decodeBase64(s string) ([]byte, error) {

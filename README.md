@@ -34,7 +34,7 @@ When `config.json` does not exist, `sw run` creates it automatically with editab
 5. After the complete speed-test barrier, check Gemini only for speed-test successes. With `output.gemini_file: true`, write `gemini.txt` and matching protocol files such as `gemini-vless.txt`, containing only nodes classified as `available`. With the setting disabled, do not create separate Gemini files; instead append `Gemini 🐱` to each available node's remark in `all.txt`, `url-test-finished*.txt` and `speed-test-finished*.txt`, including their protocol-specific lists.
 6. At the end of the run, print each source subscription and how many unique URL-passed nodes it contributed, sorted from highest count to lowest. If a passing node occurs in multiple sources, it is credited to each of those sources while being tested only once globally.
 
-All output lists are plain-text URI subscriptions, one URI per line. Failed-stage lists, temporary `selected`/`unique` lists, duplicate `tested` lists, service diagnostics and CSV reports are not exported. The output directory is cleaned of SubWatch-generated artifacts at the start of each run so stale files from older versions do not remain. Each invocation still performs one pass only; continuous/infinite cycling is not enabled.
+All result lists are plain-text files, one entry per line. `invalid.txt` contains only malformed or unsupported proxy entries rejected during parsing; nodes that parse successfully but fail URL or speed tests are not considered invalid configs. Failed-stage lists, temporary `selected`/`unique` lists, duplicate `tested` lists, service diagnostics and CSV reports are not exported. The output directory is cleaned of SubWatch-generated artifacts at the start of each run so stale files from older versions do not remain. Each invocation still performs one pass only; continuous/infinite cycling is not enabled.
 
 ## Live terminal status
 
@@ -75,6 +75,7 @@ For compatibility, an old `config.json` containing a `final_check` object is acc
 The output directory contains only these result groups:
 
 - `all.txt` — every parsed proxy URI from all sources (duplicates included).
+- `invalid.txt` — original non-empty, non-comment config lines rejected by the parser. This file is written even when no valid proxy nodes were found; URL-test and speed-test failures are not included.
 - `url-test-finished.txt` and `url-test-finished-<protocol>.txt` — all URL-test-passed nodes and their per-protocol subsets.
 - `speed-test-finished.txt` and `speed-test-finished-<protocol>.txt` — nodes that passed both download and upload thresholds and their per-protocol subsets.
 - `gemini.txt` and `gemini-<protocol>.txt` — nodes classified as Gemini `available`, created when `output.gemini_file` is `true`. When it is `false`, Gemini availability is marked in the node name across all applicable earlier files instead.

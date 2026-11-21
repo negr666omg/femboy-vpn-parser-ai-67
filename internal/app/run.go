@@ -156,7 +156,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := os.Chmod(opts.OutDir, 0700); err != nil {
 		return err
 	}
-	// Keep the output directory focused on the five user-facing result groups.
+	// Keep the output directory focused on generated result files, including invalid input lines.
 	// Intermediate selections, failed lists, CSV diagnostics and obsolete files
 	// are deliberately not exported.
 	if err := cleanOutputArtifacts(opts.OutDir); err != nil {
@@ -232,6 +232,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// tested once globally, then credited to every source that contained them.
 	perSourceNodes := make([][]sub.Node, len(sources))
 	invalid, sourceErrors := 0, 0
+	var invalidConfigs []string
 	var sourceDiagnostics []string
 	for i, source := range sources {
 		if source.LoadError != nil {
@@ -252,12 +253,13 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			Reference: source.Reference, Phase: "parsing",
 		}
 		renderSourceProgress(progress)
-		nodes, bad, parseErr := sub.ParseDocumentWithProgress(source.Body, func(processed, total, parsedNodes, invalidLines int) {
+		nodes, invalidLines, parseErr := sub.ParseDocumentWithDiagnostics(source.Body, func(processed, total, parsedNodes, invalidCount int) {
 			progress.LinesProcessed, progress.TotalLines = processed, total
-			progress.Nodes, progress.Invalid = parsedNodes, invalidLines
+			progress.Nodes, progress.Invalid = parsedNodes, invalidCount
 			renderSourceProgress(progress)
 		})
-		invalid += bad
+		invalid += len(invalidLines)
+		invalidConfigs = append(invalidConfigs, invalidLines...)
 		if parseErr != nil {
 			progress.Phase = "parse failed"
 			renderSourceProgress(progress)
@@ -274,7 +276,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		progress.Phase = "parsed"
 		progress.LinesProcessed = progress.TotalLines
 		progress.Nodes = len(nodes)
-		progress.Invalid = bad
+		progress.Invalid = len(invalidLines)
 		renderSourceProgress(progress)
 	}
 	if sourceProgressRendered {
@@ -283,6 +285,10 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
 	}
+	if err := writeInvalidLines(filepath.Join(opts.OutDir, "invalid.txt"), invalidConfigs); err != nil {
+		return fmt.Errorf("write invalid configs: %w", err)
+	}
+	fmt.Fprintf(stdout, "Invalid configs saved: %d -> %s\n", len(invalidConfigs), filepath.Join(opts.OutDir, "invalid.txt"))
 	if len(parsed) == 0 {
 		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
 	}
@@ -1364,7 +1370,7 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 // from older versions must not survive a new run.
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
-		"all.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt",
+		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt",
 		"speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
@@ -1569,6 +1575,20 @@ func writeSubscription(path string, nodes []sub.Node) error {
 	var b strings.Builder
 	for _, n := range nodes {
 		b.WriteString(n.URI)
+		b.WriteByte('\n')
+	}
+	return writeAtomic(path, []byte(b.String()))
+}
+
+// writeInvalidLines keeps rejected proxy entries as plain input lines.
+func writeInvalidLines(path string, lines []string) error {
+	var b strings.Builder
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		b.WriteString(line)
 		b.WriteByte('\n')
 	}
 	return writeAtomic(path, []byte(b.String()))
