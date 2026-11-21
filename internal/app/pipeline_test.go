@@ -27,6 +27,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
   "speed_test":{"provider":"ookla","concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
   "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json","name_format":"{flag} {download}↓{upload}↑","speed_decimals":2},
   "final_check":{"enabled":false,"concurrency":1,"timeout":"8s"},
+  "live_display":{"mode":"after_result"},
   "output":{"directory":"results","split_by_protocol":true,"subscription_text":false,"gemini_file":false}
 }`
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
@@ -51,6 +52,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.GeminiFile {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
+	if opts.LiveDisplayMode != "after_result" { t.Fatalf("live display mode = %q, want after_result", opts.LiveDisplayMode) }
 	if opts.SpeedProvider != "ookla" { t.Fatalf("speed provider = %q, want ookla", opts.SpeedProvider) }
 	if opts.DownloadBytes != 0 || opts.UploadBytes != 0 || opts.SpeedDownloadURL != "" || opts.SpeedUploadURL != "" {
 		t.Fatalf("Cloudflare-only settings must be disabled for Ookla: %+v", opts)
@@ -76,6 +78,23 @@ func TestSourceTimeoutMustBePositive(t *testing.T) {
 func TestDefaultSourceTimeout(t *testing.T) {
 	if got := DefaultOptions().SourceTimeout; got != 30*time.Second {
 		t.Fatalf("default source timeout = %s, want 30s", got)
+	}
+}
+
+func TestDefaultLiveDisplayModeKeepsCompletedServerVisible(t *testing.T) {
+	if got := DefaultOptions().LiveDisplayMode; got != "after_result" {
+		t.Fatalf("default live display mode = %q, want after_result", got)
+	}
+}
+
+func TestInvalidLiveDisplayModeIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"live_display":{"mode":"sometimes"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "live_display.mode") {
+		t.Fatalf("expected invalid live_display.mode error, got %v", err)
 	}
 }
 
@@ -820,7 +839,7 @@ func TestLiveStageKeepsLastPingWhileNextConfigRuns(t *testing.T) {
 	result := make(chan error, 1)
 
 	go func() {
-		_, err := runStageWithLiveCallback(
+		_, err := runStageWithLiveCallbackMode(
 			context.Background(), "URL TEST", nodes, 1, &out,
 			func(n *sub.Node) bool { return n.URLPassed },
 			func(_ context.Context, n *sub.Node, live func(sub.Node, string)) {
@@ -838,18 +857,23 @@ func TestLiveStageKeepsLastPingWhileNextConfigRuns(t *testing.T) {
 				live(*n, urlLiveDetail(*n))
 			},
 			nil,
+			"after_result",
 		)
 		result <- err
 	}()
 
 	<-secondStarted
 	output := out.String()
-	if !strings.Contains(output, "Second config (ss)") || !strings.Contains(output, "last ping: 42 ms") {
-		t.Fatalf("last completed ping was not kept visible while the next config runs: %q", output)
+	if !strings.Contains(output, "First config (vless)") || !strings.Contains(output, "ping: 42 ms") || strings.Contains(output, "Second config (ss)") {
+		t.Fatalf("previous server's full line should remain while the next server is being tested: %q", output)
 	}
 	close(releaseSecond)
 	if err := <-result; err != nil {
 		t.Fatal(err)
+	}
+	output = out.String()
+	if !strings.Contains(output, "Second config (ss)") || !strings.Contains(output, "ping: 87 ms") {
+		t.Fatalf("new server line should replace the previous one after its result: %q", output)
 	}
 }
 
@@ -862,7 +886,7 @@ func TestLiveStatusFitsTerminalAndKeepsPingAtRightEdge(t *testing.T) {
 		URLLatencyMS: 124,
 	}
 	for _, width := range []int{40, 80, 120, 160} {
-		line := formatLiveStatusLine("URL TEST", 222, 640, 8, "124 ms", node, "checking URL and collecting a long diagnostic status", width)
+		line := formatLiveStatusLine("URL TEST", 222, 640, 8, node, "checking URL and collecting a long diagnostic status", width)
 		if !strings.HasSuffix(line, "ping: 124 ms") {
 			t.Fatalf("ping is not the final field for width %d: %q", width, line)
 		}
