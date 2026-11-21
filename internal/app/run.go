@@ -370,6 +370,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
 	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
 	var urlPassedLive []sub.Node
+	var urlFailedLive []sub.Node
 	var urlFilesMu sync.Mutex
 	urlResults, stageErr := runStageWithLiveCallback(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, "checking URL…")
@@ -389,18 +390,29 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		live(*n, urlLiveDetail(*n))
 	}, func(completed sub.Node) error {
-		if !completed.URLPassed {
-			return nil
-		}
 		urlFilesMu.Lock()
 		defer urlFilesMu.Unlock()
-		urlPassedLive = append(urlPassedLive, completed)
-		return writeStageFiles(opts.OutDir, "url-test-finished", urlPassedLive, true)
+		if completed.URLPassed {
+			urlPassedLive = append(urlPassedLive, completed)
+			return writeStageFiles(opts.OutDir, "url-test-finished", urlPassedLive, true)
+		}
+		urlFailedLive = append(urlFailedLive, completed)
+		if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailedLive, true); err != nil {
+			return err
+		}
+		return writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailedLive)
 	})
 	if stageErr != nil {
 		return stageErr
 	}
 	urlPassed := filterNodes(urlResults, func(n sub.Node) bool { return n.URLPassed })
+	urlFailed := filterNodes(urlResults, func(n sub.Node) bool { return !n.URLPassed })
+	if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailed, true); err != nil {
+		return err
+	}
+	if err := writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailed); err != nil {
+		return err
+	}
 	// Keep every selected node's remark synchronized in all.txt too. Nodes
 	// that fail URL reachability cannot have a meaningful country/speed result,
 	// so they receive the explicit 🌐 Unknown fallback rather than the source name.
@@ -1797,7 +1809,7 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 // from older versions must not survive a new run.
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
-		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt",
+		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
 		"speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
@@ -2000,6 +2012,35 @@ func writeAtomic(path string, data []byte) error {
 	}
 	ok = true
 	return nil
+}
+
+// writeURLFailureReport creates a human-readable report with the exact reason
+// each node failed. The separate url-test-failed.txt remains a URI-only list
+// that can be imported into another proxy client.
+func writeURLFailureReport(path, target string, nodes []sub.Node) error {
+	var b strings.Builder
+	fmt.Fprintln(&b, "SubWatch URL TEST failures")
+	fmt.Fprintf(&b, "Target: %s\n", cleanLiveText(target))
+	fmt.Fprintf(&b, "Failed nodes: %d\n", len(nodes))
+	if len(nodes) == 0 {
+		fmt.Fprintln(&b, "\nNo URL test failures.")
+		return writeAtomic(path, []byte(b.String()))
+	}
+	for i, n := range nodes {
+		name := cleanLiveText(n.Name)
+		if name == "" {
+			name = "unnamed config"
+		}
+		reason := cleanLiveText(n.URLError)
+		if reason == "" {
+			reason = "URL test failed without an error message"
+		}
+		fmt.Fprintf(&b, "\n[%d] %s (%s)\n", i+1, name, protocolOf(n))
+		fmt.Fprintf(&b, "Latency: %d ms\n", n.URLLatencyMS)
+		fmt.Fprintf(&b, "Reason: %s\n", reason)
+		fmt.Fprintf(&b, "URI: %s\n", cleanLiveText(n.URI))
+	}
+	return writeAtomic(path, []byte(b.String()))
 }
 
 func writeSubscription(path string, nodes []sub.Node) error {
