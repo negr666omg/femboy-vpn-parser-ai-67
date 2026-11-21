@@ -318,7 +318,9 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 	for name, want := range map[string]string{
 		"url-test-finished-vless.txt": "vless://url-one\n",
 		"url-test-finished-ss.txt": "ss://url-two\n",
+		"speed-test-finished.txt": "vless://speed-one\n",
 		"speed-test-finished-vless.txt": "vless://speed-one\n",
+		"gemini.txt": "ss://gemini-one\n",
 		"gemini-ss.txt": "ss://gemini-one\n",
 	} {
 		got, err := os.ReadFile(filepath.Join(dir, name))
