@@ -1163,7 +1163,7 @@ func TestSourceRetryWaitStopsOnCancellation(t *testing.T) {
 			return nil, errors.New("dial tcp: i/o timeout")
 		},
 		func(progress sourceProgress) {
-			if progress.Phase == "connection unavailable; retrying in 5s" {
+			if strings.HasPrefix(progress.Phase, "connection unavailable; retry ") {
 				cancel()
 			}
 		},
