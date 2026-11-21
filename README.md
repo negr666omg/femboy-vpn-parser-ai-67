@@ -92,7 +92,7 @@ A timeout or HTTP/read error while downloading one subscription now marks only t
 
 ## Remote SFTP upload
 
-SubWatch can upload the `.txt` result files from `out/` to a remote directory after each completed cycle. Configure `remote_upload` in `config.json`:
+SubWatch can upload the `.txt` result files from `out/`, including the combined `failed.txt` report, to a remote directory after each completed cycle. Configure `remote_upload` in `config.json`:
 
 ```json
 "remote_upload": {
