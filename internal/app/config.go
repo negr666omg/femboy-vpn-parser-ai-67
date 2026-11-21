@@ -12,6 +12,7 @@ import (
 
 type Options struct {
 	Sources            string
+	SourceTimeout      time.Duration
 	OutDir             string
 	Interface          string
 	IsolateSourceDownloads bool
@@ -63,7 +64,8 @@ type fileConfig struct {
 		IsolateSourceDownloads bool   `json:"isolate_source_downloads"`
 	} `json:"network"`
 	Sources struct {
-		File string `json:"file"`
+		File    string `json:"file"`
+		Timeout string `json:"timeout"`
 	} `json:"sources"`
 	Protocols struct {
 		Enabled []string `json:"enabled"`
@@ -116,7 +118,7 @@ type fileConfig struct {
 
 func DefaultOptions() Options {
 	return Options{
-		Sources: "sources.txt", OutDir: "out", Interface: "auto",
+		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto",
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4,
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
@@ -156,6 +158,13 @@ func LoadOptions(path string) (Options, error) {
 	opts.IsolateSourceDownloads = cfg.Network.IsolateSourceDownloads
 	if cfg.Sources.File != "" {
 		opts.Sources = cfg.Sources.File
+	}
+	if cfg.Sources.Timeout != "" {
+		d, e := time.ParseDuration(cfg.Sources.Timeout)
+		if e != nil || d <= 0 {
+			return opts, fmt.Errorf("sources.timeout must be a positive duration: %q", cfg.Sources.Timeout)
+		}
+		opts.SourceTimeout = d
 	}
 	if !filepath.IsAbs(opts.Sources) {
 		opts.Sources = filepath.Join(filepath.Dir(path), opts.Sources)
@@ -326,7 +335,8 @@ func ExampleConfig() string {
     "isolate_source_downloads": false
   },
   "sources": {
-    "file": "sources.txt"
+    "file": "sources.txt",
+    "timeout": "30s"
   },
   "protocols": {
     "enabled": ["vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"]
