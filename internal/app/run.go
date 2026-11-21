@@ -39,14 +39,8 @@ func Init(dir string) error {
 		"sources.txt": "# One subscription URL, local file path, or single share link per line.\n# https://example.net/subscription\n# ./my-subscription.txt\n",
 		"config.json": ExampleConfig(),
 	} {
-		path := filepath.Join(dir, name)
-		if _, err := os.Stat(path); err == nil {
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
-			return err
+		if err := writeDefaultIfMissing(filepath.Join(dir, name), body); err != nil {
+			return fmt.Errorf("create %s: %w", name, err)
 		}
 	}
 	return nil
@@ -356,7 +350,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintln(stdout, "[prepare] Checking sing-box; first run may download the verified core...")
-	corePath, err := core.FindOrDownloadProgress(opts.CorePath, stdout)
+	corePath, err := core.FindOrDownloadProgressContext(ctx, opts.CorePath, stdout)
 	if err != nil {
 		return fmt.Errorf("sing-box: %w", err)
 	}
@@ -1825,21 +1819,35 @@ func cleanOutputArtifacts(dir string) error {
 			return err
 		}
 	}
-	// Protocol-only lists from earlier runs are named <protocol>.txt.
-	for _, protocol := range []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http", "unknown"} {
+	// Protocol-only lists from earlier releases used bare protocol names.
+	for _, protocol := range []string{
+		"vless", "vmess", "trojan", "ss", "shadowsocks",
+		"hysteria", "hysteria2", "tuic", "socks", "socks5", "http", "unknown",
+	} {
 		if err := os.Remove(filepath.Join(dir, protocol+".txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	patterns := []string{"*-*.txt", "*-*.json"}
-	for _, pattern := range patterns {
-		paths, err := filepath.Glob(filepath.Join(dir, pattern))
-		if err != nil {
-			return err
-		}
-		for _, path := range paths {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+
+	// Remove only known SubWatch split-output prefixes. A broad "*-*.txt"
+	// pattern also deletes unrelated files such as "notes-old.txt" that
+	// users may intentionally keep in the output directory.
+	prefixes := []string{
+		"all-", "unique-", "selected-",
+		"url-test-finished-", "url-test-failed-",
+		"speed-test-finished-", "speedtest-finished-", "speedtest-failed-",
+		"tested-", "service-check-results-", "final-", "gemini-",
+	}
+	for _, prefix := range prefixes {
+		for _, extension := range []string{".txt", ".json"} {
+			paths, err := filepath.Glob(filepath.Join(dir, prefix+"*"+extension))
+			if err != nil {
 				return err
+			}
+			for _, path := range paths {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
 			}
 		}
 	}
