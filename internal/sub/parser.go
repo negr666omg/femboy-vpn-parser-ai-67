@@ -20,6 +20,7 @@ type Node struct {
 	URLPassed    bool            `json:"url_passed"`
 	URLLatencyMS int64           `json:"url_latency_ms,omitempty"`
 	URLError     string          `json:"url_error,omitempty"`
+	RenameError  string          `json:"rename_error,omitempty"`
 	SpeedPassed  bool            `json:"speed_passed"`
 	DownloadMbps float64         `json:"download_mbps"`
 	UploadMbps   float64         `json:"upload_mbps"`
@@ -342,14 +343,23 @@ func parseTrojan(u *url.URL) (map[string]any, error) {
 	}
 	return o, nil
 }
-func parseVMess(u *url.URL) (map[string]any, error) {
+func vmessPayload(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
 	raw := strings.TrimPrefix(u.Opaque, "//")
-	if raw == "" {
-		raw = strings.TrimPrefix(u.Host, "//")
+	if raw != "" {
+		return raw
 	}
-	if raw == "" {
-		raw = u.Host
+	raw = strings.TrimPrefix(u.Host, "//")
+	if u.EscapedPath() != "" {
+		raw += u.EscapedPath()
 	}
+	return raw
+}
+
+func parseVMess(u *url.URL) (map[string]any, error) {
+	raw := vmessPayload(u)
 	b, e := decodeBase64(raw)
 	if e != nil {
 		return nil, fmt.Errorf("vmess payload: %w", e)
@@ -549,11 +559,39 @@ func parseHTTP(u *url.URL) (map[string]any, error) {
 
 // RenameNode updates both the exported node name and the URI remark consumed by subscription clients.
 func RenameNode(n *Node, name string) {
-	if n == nil || strings.TrimSpace(name) == "" { return }
+	if n == nil || strings.TrimSpace(name) == "" {
+		return
+	}
 	u, err := url.Parse(n.URI)
-	if err != nil { return }
+	if err != nil {
+		return
+	}
+
+	if strings.EqualFold(u.Scheme, "vmess") {
+		if payload, decodeErr := decodeBase64(vmessPayload(u)); decodeErr == nil {
+			var config map[string]json.RawMessage
+			if json.Unmarshal(payload, &config) == nil {
+				if encodedName, marshalErr := json.Marshal(name); marshalErr == nil {
+					config["ps"] = encodedName
+					if updated, marshalErr := json.Marshal(config); marshalErr == nil {
+						// Keep the whole Base64 payload opaque. VMess JSON may encode
+						// slash characters, which a hierarchical URL parser treats as a path.
+						u.Opaque = "//" + base64.StdEncoding.EncodeToString(updated)
+						u.User = nil
+						u.Host = ""
+						u.Path = ""
+						u.RawPath = ""
+					}
+				}
+			}
+		}
+	}
+
 	u.Fragment = name
 	n.URI = u.String()
 	n.Name = name
+	if n.Outbound == nil {
+		n.Outbound = make(map[string]any)
+	}
 	n.Outbound["_name"] = name
 }

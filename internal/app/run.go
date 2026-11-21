@@ -128,23 +128,50 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.URL == "" {
 		opts.URL = "https://www.gstatic.com/generate_204"
 	}
-	if opts.SpeedDownloadURL == "" {
-		opts.SpeedDownloadURL = "https://speed.cloudflare.com/__down?bytes={bytes}"
+	if opts.SpeedProvider == "" {
+		opts.SpeedProvider = "cloudflare"
 	}
-	if opts.SpeedUploadURL == "" {
-		opts.SpeedUploadURL = "https://speed.cloudflare.com/__up"
+	opts.SpeedProvider = strings.ToLower(strings.TrimSpace(opts.SpeedProvider))
+	if opts.SpeedProvider != "cloudflare" && opts.SpeedProvider != "ookla" {
+		return fmt.Errorf("speed_test.provider must be cloudflare or ookla")
 	}
-	if opts.DownloadBytes == 0 {
-		opts.DownloadBytes = 8 << 20
+	if opts.MaxSpeedDuration <= 0 {
+		opts.MaxSpeedDuration = DefaultOptions().MaxSpeedDuration
 	}
-	if opts.UploadBytes == 0 {
-		opts.UploadBytes = 4 << 20
-	}
-	if opts.DownloadBytes < 64*1024 || opts.UploadBytes < 64*1024 {
-		return fmt.Errorf("download/upload test payload must be at least 64 KiB")
-	}
-	if opts.DownloadBytes > 100<<20 || opts.UploadBytes > 100<<20 {
-		return fmt.Errorf("download/upload test payload cannot exceed 100 MiB")
+	if opts.SpeedProvider == "ookla" {
+		// These settings are specific to the Cloudflare HTTP endpoint and do
+		// not apply to Ookla's automatically selected Speedtest.net server.
+		opts.FirstByteTimeout = 0
+		opts.SpeedSampleInterval = 0
+		opts.DownloadBytes = 0
+		opts.UploadBytes = 0
+		opts.SpeedDownloadURL = ""
+		opts.SpeedUploadURL = ""
+	} else {
+		if opts.SpeedDownloadURL == "" {
+			opts.SpeedDownloadURL = "https://speed.cloudflare.com/__down?bytes={bytes}"
+		}
+		if opts.SpeedUploadURL == "" {
+			opts.SpeedUploadURL = "https://speed.cloudflare.com/__up"
+		}
+		if opts.DownloadBytes == 0 {
+			opts.DownloadBytes = 8 << 20
+		}
+		if opts.UploadBytes == 0 {
+			opts.UploadBytes = 4 << 20
+		}
+		if opts.FirstByteTimeout <= 0 {
+			opts.FirstByteTimeout = DefaultOptions().FirstByteTimeout
+		}
+		if opts.SpeedSampleInterval <= 0 {
+			opts.SpeedSampleInterval = DefaultOptions().SpeedSampleInterval
+		}
+		if opts.DownloadBytes < 64*1024 || opts.UploadBytes < 64*1024 {
+			return fmt.Errorf("download/upload test payload must be at least 64 KiB")
+		}
+		if opts.DownloadBytes > 100<<20 || opts.UploadBytes > 100<<20 {
+			return fmt.Errorf("download/upload test payload cannot exceed 100 MiB")
+		}
 	}
 	if len(opts.Protocols) == 0 {
 		opts.Protocols = DefaultOptions().Protocols
@@ -338,6 +365,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		} else if !passed {
 			n.URLError = "URL test returned non-success status"
 		}
+		if passed && opts.RenameNodes {
+			n.RenameError = renameNodeAfterURL(stageCtx, n, opts)
+		}
 		live(*n, urlLiveDetail(*n))
 	}, func(completed sub.Node) error {
 		if !completed.URLPassed {
@@ -378,20 +408,14 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return
 		}
 		n.SpeedPassed = true
+		speedState := "PASS"
 		if opts.RenameNodes {
-			geoErr := withNodeClient(stageCtx, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
-				country := lookupCountry(ctx, client, opts.GeoIPURL)
-				flag := countryFlag(country)
-				if flag == "" { return fmt.Errorf("GeoIP country lookup failed") }
-				n.Country = country
-				name := strings.NewReplacer("{flag}", flag, "{download}", formatMbps(down, opts.SpeedDecimals), "{upload}", formatMbps(up, opts.SpeedDecimals)).Replace(opts.NameFormat)
-				if name == opts.NameFormat { return fmt.Errorf("service_check.name_format has no supported placeholders") }
-				sub.RenameNode(n, name)
-				return nil
-			})
-			if geoErr != nil { n.SpeedError = "rename: " + geoErr.Error() }
+			n.RenameError = renameNodeAfterSpeed(stageCtx, n, opts, down, up)
+			if n.RenameError != "" {
+				speedState += " | rename: " + shortLiveError(n.RenameError)
+			}
 		}
-		live(*n, speedLiveDetail(*n, "PASS"))
+		live(*n, speedLiveDetail(*n, speedState))
 	}, nil)
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
@@ -1022,7 +1046,11 @@ func cleanLiveText(value string) string {
 
 func urlLiveDetail(n sub.Node) string {
 	if n.URLPassed {
-		return "URL: PASS"
+		detail := "URL: PASS"
+		if n.RenameError != "" {
+			detail += " | rename: " + shortLiveError(n.RenameError)
+		}
+		return detail
 	}
 	if n.URLError != "" {
 		return "URL: FAIL (" + shortLiveError(n.URLError) + ")"
@@ -1340,6 +1368,77 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 	return down, up, err
 }
 
+
+func urlStageNodeName(country string) string {
+	return countryFlag(strings.ToUpper(strings.TrimSpace(country)))
+}
+
+func renameNodeAfterURL(parent context.Context, n *sub.Node, opts Options) string {
+	if n == nil {
+		return "cannot rename a nil node"
+	}
+	if err := ensureNodeCountry(parent, n, opts); err != nil {
+		return err.Error()
+	}
+	name := urlStageNodeName(n.Country)
+	if name == "" {
+		return "GeoIP country lookup returned an invalid country code"
+	}
+	// Speed placeholders are intentionally omitted until both measurements exist.
+	sub.RenameNode(n, name)
+	return ""
+}
+
+func renameNodeAfterSpeed(parent context.Context, n *sub.Node, opts Options, download, upload float64) string {
+	if n == nil {
+		return "cannot rename a nil node"
+	}
+	if err := ensureNodeCountry(parent, n, opts); err != nil {
+		return err.Error()
+	}
+	flag := countryFlag(n.Country)
+	if flag == "" {
+		return "GeoIP country lookup returned an invalid country code"
+	}
+	template := opts.NameFormat
+	if template == "" {
+		template = DefaultOptions().NameFormat
+	}
+	name := strings.NewReplacer(
+		"{flag}", flag,
+		"{download}", formatMbps(download, opts.SpeedDecimals),
+		"{upload}", formatMbps(upload, opts.SpeedDecimals),
+	).Replace(template)
+	if strings.TrimSpace(name) == "" {
+		return "service_check.name_format produced an empty node name"
+	}
+	sub.RenameNode(n, name)
+	return ""
+}
+
+func ensureNodeCountry(parent context.Context, n *sub.Node, opts Options) error {
+	if n == nil {
+		return fmt.Errorf("node is nil")
+	}
+	if countryFlag(strings.ToUpper(strings.TrimSpace(n.Country))) != "" {
+		n.Country = strings.ToUpper(strings.TrimSpace(n.Country))
+		return nil
+	}
+	return withNodeClient(parent, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
+		country := lookupCountry(ctx, client, opts.GeoIPURL)
+		if countryFlag(country) == "" {
+			// Retry with independent public GeoIP providers if the configured endpoint
+			// is unavailable or does not return a usable ISO country code.
+			country = check.LookupIP(ctx, client).Country
+		}
+		country = strings.ToUpper(strings.TrimSpace(country))
+		if countryFlag(country) == "" {
+			return fmt.Errorf("GeoIP country lookup failed")
+		}
+		n.Country = country
+		return nil
+	})
+}
 
 func lookupCountry(ctx context.Context, client *http.Client, endpoint string) string {
 	if endpoint == "" { endpoint = "https://ipwho.is/" }
