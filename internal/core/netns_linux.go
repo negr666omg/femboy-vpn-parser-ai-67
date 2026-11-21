@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -30,6 +31,43 @@ type NetworkNamespace struct {
 	macvlanCreated bool
 	dhcpAttempted bool
 	resolvDirCreated bool
+}
+
+// HostInterface returns the host-side veth used to reach the proxy inside this
+// namespace. Host-side proxy connections must use this link rather than the
+// host's default route, which may belong to an unrelated VPN.
+func (n *NetworkNamespace) HostInterface() string {
+	if n == nil {
+		return ""
+	}
+	return n.hostVeth
+}
+
+// namespaceProxyDialer pins host-to-namespace proxy traffic to the veth and
+// selects its host-side address. This keeps SubWatch's local proxy transport
+// reachable even when policy routing or a VPN changes the default route.
+func namespaceProxyDialer(hostInterface string) *net.Dialer {
+	if hostInterface == "" {
+		return nil
+	}
+	return &net.Dialer{
+		Timeout:   200 * time.Millisecond,
+		LocalAddr: &net.TCPAddr{IP: net.ParseIP("10.254.0.1")},
+		Control: func(_, _ string, raw syscall.RawConn) error {
+			var setErr error
+			if err := raw.Control(func(fd uintptr) {
+				setErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, hostInterface)
+			}); err != nil {
+				return err
+			}
+			// Kernels before 5.7 may require CAP_NET_RAW for SO_BINDTODEVICE.
+			// The source address still selects the connected veth route there.
+			if setErr == syscall.EPERM || setErr == syscall.EACCES || setErr == syscall.ENOPROTOOPT {
+				return nil
+			}
+			return setErr
+		},
+	}
 }
 
 func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*NetworkNamespace, error) {
