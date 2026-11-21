@@ -360,7 +360,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 
 	// Stage 2 begins only after every URL test has completed (global barrier).
 	// urlPassed remains the authoritative in-memory result set.
-	fmt.Fprintf(stdout, "\n[3/4] SPEED TEST: %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
+	fmt.Fprintf(stdout, "\n[3/4] SPEED TEST (%s): %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", strings.ToUpper(opts.SpeedProvider), len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
 	speedResults, _ := runStageWithLiveCallback(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "starting "+strings.ToUpper(opts.SpeedProvider)+" speed test…"))
 		down, up, testErr := runSpeedTestWithProgress(stageCtx, *n, opts, func(progress check.SpeedProgress) {
@@ -1037,9 +1037,17 @@ func speedLiveDetail(n sub.Node, state string) string {
 func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
 	state := progress.Phase
 	if progress.Phase == "download" {
-		state = fmt.Sprintf("downloading %d/%d bytes", progress.CompletedBytes, progress.TotalBytes)
+		if progress.TotalBytes > 0 {
+			state = fmt.Sprintf("downloading %d/%d bytes", progress.CompletedBytes, progress.TotalBytes)
+		} else {
+			state = fmt.Sprintf("downloading %d bytes", progress.CompletedBytes)
+		}
 	} else if progress.Phase == "upload" {
-		state = fmt.Sprintf("uploading %d/%d bytes", progress.CompletedBytes, progress.TotalBytes)
+		if progress.TotalBytes > 0 {
+			state = fmt.Sprintf("uploading %d/%d bytes", progress.CompletedBytes, progress.TotalBytes)
+		} else {
+			state = fmt.Sprintf("uploading %d bytes", progress.CompletedBytes)
+		}
 	}
 	return fmt.Sprintf("download: %.0f Mbps | upload: %.0f Mbps | %s", progress.DownloadMbps, progress.UploadMbps, state)
 }
