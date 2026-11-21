@@ -877,38 +877,73 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 	var progressMu sync.Mutex
 	var callbackErr error
 	done, successes := 0, 0
-	var nextTicket, visibleTicket uint64
-	visibleNode := sub.Node{}
-	visibleDetail := "waiting…"
+	type workerStatus struct {
+		node   sub.Node
+		detail string
+		active bool
+	}
+	statuses := make([]workerStatus, concurrency)
+	for i := range statuses {
+		statuses[i] = workerStatus{
+			node:   sub.Node{Name: fmt.Sprintf("Worker %d", i+1)},
+			detail: "waiting…",
+		}
+	}
 
+	terminalWidth := liveTerminalWidth(stdout)
+	terminalRowsDrawn := false
 	render := func() {
-		line := formatLiveStatusLine(label, done, len(nodes), successes, visibleNode, visibleDetail, liveTerminalWidth(stdout))
+		if terminalWidth > 0 {
+			active := 0
+			for _, status := range statuses {
+				if status.active {
+					active++
+				}
+			}
+			header := fmt.Sprintf("[%s] %d/%d | active: %d | passed: %d | failed: %d",
+				label, done, len(nodes), active, successes, done-successes)
+			if terminalRowsDrawn {
+				fmt.Fprintf(stdout, "\x1b[%dA", concurrency+1)
+			}
+			fmt.Fprintf(stdout, "\r\x1b[2K%s\n", truncateDisplay(header, terminalWidth-1))
+			for i, status := range statuses {
+				line := formatLiveWorkerStatusLine(label, i+1, status.node, status.detail, terminalWidth)
+				fmt.Fprintf(stdout, "\r\x1b[2K%s\n", line)
+			}
+			terminalRowsDrawn = true
+			return
+		}
+
+		// When stdout is not a terminal, preserve the compact single-line log
+		// behavior; the terminal UI above gets one independently updated row
+		// for every concurrent worker.
+		visible := 0
+		for i := range statuses {
+			if statuses[i].active {
+				visible = i
+			}
+		}
+		line := formatLiveStatusLine(label, done, len(nodes), successes, statuses[visible].node, statuses[visible].detail, 0)
 		fmt.Fprintf(stdout, "\r\x1b[2K%s", line)
 	}
 
 	for worker := 0; worker < concurrency; worker++ {
 		workers.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer workers.Done()
 			for i := range jobs {
 				results[i] = nodes[i]
 
 				progressMu.Lock()
-				nextTicket++
-				ticket := nextTicket
-				visibleTicket = ticket
-				visibleNode = results[i]
-				visibleDetail = "starting…"
+				statuses[workerID] = workerStatus{node: results[i], detail: "starting…", active: true}
 				render()
 				progressMu.Unlock()
 
 				emit := func(node sub.Node, detail string) {
 					progressMu.Lock()
-					if ticket == visibleTicket {
-						visibleNode = node
-						visibleDetail = cleanLiveText(detail)
-						render()
-					}
+					statuses[workerID].node = node
+					statuses[workerID].detail = cleanLiveText(detail)
+					render()
 					progressMu.Unlock()
 				}
 
@@ -928,22 +963,27 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 				if passed(&results[i]) {
 					successes++
 				}
-				if ticket == visibleTicket {
-					visibleNode = results[i]
-					visibleDetail = stageResultDetail(label, results[i])
-				}
+				statuses[workerID].node = results[i]
+				statuses[workerID].detail = stageResultDetail(label, results[i])
+				statuses[workerID].active = false
 				render()
 				progressMu.Unlock()
 			}
-		}()
+		}(worker)
 	}
 	for i := range nodes {
 		jobs <- i
 	}
 	close(jobs)
 	workers.Wait()
-	fmt.Fprintln(stdout)
+	if terminalWidth <= 0 {
+		fmt.Fprintln(stdout)
+	}
 	return results, callbackErr
+}
+func formatLiveWorkerStatusLine(label string, worker int, node sub.Node, detail string, terminalWidth int) string {
+	head := fmt.Sprintf("[%s worker %d]", label, worker)
+	return formatLiveStatusParts(head, liveNodeTitle(node), detail, livePingText(node), terminalWidth)
 }
 
 func liveNodeTitle(n sub.Node) string {
@@ -1006,9 +1046,12 @@ func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
 // accidental auto-wrap at the right margin.
 func formatLiveStatusLine(label string, done, total, passed int, node sub.Node, detail string, terminalWidth int) string {
 	head := fmt.Sprintf("[%s] %d/%d | passed: %d | failed: %d", label, done, total, passed, done-passed)
-	identity := liveNodeTitle(node)
+	return formatLiveStatusParts(head, liveNodeTitle(node), detail, livePingText(node), terminalWidth)
+}
+
+func formatLiveStatusParts(head, identity, detail, ping string, terminalWidth int) string {
+	identity = cleanLiveText(identity)
 	detail = cleanLiveText(detail)
-	ping := livePingText(node)
 
 	// When stdout is redirected, do not pad output to an assumed width, but
 	// always keep ping last so captured logs have the same field order.

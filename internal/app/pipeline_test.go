@@ -648,6 +648,7 @@ func TestPrintSubscriptionPassSummarySortsDescendingAndKeepsStableTies(t *testin
 }
 
 func TestLiveStageRendersOneReplaceableStatusLine(t *testing.T) {
+	t.Setenv("COLUMNS", "")
 	nodes := []sub.Node{
 		{Name: "First config", Protocol: "vless"},
 		{Name: "Second config", Protocol: "ss"},
@@ -784,5 +785,57 @@ func TestInvalidConfigOutputIsWrittenAndCleanedBetweenRuns(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("invalid.txt should be removed before the next run, stat err=%v", err)
+	}
+}
+
+
+func TestLiveStageRendersOneStatusRowPerConcurrentWorker(t *testing.T) {
+	t.Setenv("COLUMNS", "120")
+	nodes := []sub.Node{
+		{Name: "First config", Protocol: "vless"},
+		{Name: "Second config", Protocol: "vmess"},
+	}
+	var out bytes.Buffer
+	started := make(chan struct{}, len(nodes))
+	release := make(chan struct{})
+	resultsCh := make(chan []sub.Node, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		results, err := runStageWithLiveCallback(
+			context.Background(), "URL TEST", nodes, 2, &out,
+			func(n *sub.Node) bool { return n.URLPassed },
+			func(_ context.Context, n *sub.Node, live func(sub.Node, string)) {
+				live(*n, "checking URL…")
+				started <- struct{}{}
+				<-release
+				n.URLPassed = true
+				n.URLLatencyMS = 42
+				live(*n, urlLiveDetail(*n))
+			}, nil,
+		)
+		resultsCh <- results
+		errCh <- err
+	}()
+
+	<-started
+	<-started
+	close(release)
+	results := <-resultsCh
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || !results[0].URLPassed || !results[1].URLPassed {
+		t.Fatalf("unexpected results: %#v", results)
+	}
+	output := out.String()
+	if !strings.Contains(output, "First config") || !strings.Contains(output, "Second config") {
+		t.Fatalf("concurrent worker rows did not both appear: %q", output)
+	}
+	if !strings.Contains(output, "[URL TEST worker 1]") || !strings.Contains(output, "[URL TEST worker 2]") {
+		t.Fatalf("worker row labels are missing: %q", output)
+	}
+	if !strings.Contains(output, "\x1b[3A") {
+		t.Fatalf("expected a three-row live block (summary + two workers) to be redrawn: %q", output)
 	}
 }
