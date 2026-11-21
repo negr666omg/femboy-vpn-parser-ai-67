@@ -223,6 +223,20 @@ func runCommand(args []string) error {
 			return nil
 		}
 		if err != nil {
+			if opts.RetryOnConnectionError && app.IsRetryableConnectionError(err) {
+				fmt.Fprintf(os.Stderr, "[network] %v\n[network] Connection is temporarily unavailable; retrying in 5s. Press Ctrl+C to stop.\n", err)
+				timer := time.NewTimer(5 * time.Second)
+				select {
+				case <-ctx.Done():
+					if !timer.Stop() {
+						<-timer.C
+					}
+					fmt.Fprintln(os.Stdout, "\n[stop] Interrupted while waiting for network; exiting cleanly")
+					return nil
+				case <-timer.C:
+				}
+				continue
+			}
 			return err
 		}
 		if !continuous {
