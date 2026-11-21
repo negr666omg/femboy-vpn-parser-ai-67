@@ -29,6 +29,17 @@ type ooklaServerProbe struct {
 	latency time.Duration
 }
 
+type ooklaCountingReader struct {
+	reader io.Reader
+	count  atomic.Int64
+}
+
+func (r *ooklaCountingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.count.Add(int64(n))
+	return n, err
+}
+
 // OoklaSpeedTestWithProgress discovers Speedtest.net servers automatically, selects
 // the fastest reachable server through the supplied per-node proxy, and measures
 // download and upload throughput against that server.
@@ -67,7 +78,8 @@ func ooklaSpeedTestWithEndpoint(ctx context.Context, client *http.Client, endpoi
 	if err != nil {
 		return 0, 0, fmt.Errorf("Ookla download: %w", err)
 	}
-	up, err := runOoklaDirection(ctx, client, http.MethodPost, server.URL, duration, progress, "upload")
+	uploadURL := resolveOoklaUploadURL(ctx, client, server.URL)
+	up, err := runOoklaDirection(ctx, client, http.MethodPost, uploadURL, duration, progress, "upload")
 	if err != nil {
 		return down, 0, fmt.Errorf("Ookla upload: %w", err)
 	}
@@ -211,6 +223,22 @@ func ooklaDownloadURL(uploadURL string) (string, error) {
 	return u.String(), nil
 }
 
+func resolveOoklaUploadURL(ctx context.Context, client *http.Client, target string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, target, nil)
+	if err != nil {
+		return target
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return target
+	}
+	_ = resp.Body.Close()
+	if resp.Request != nil && resp.Request.URL != nil {
+		return resp.Request.URL.String()
+	}
+	return target
+}
+
 func runOoklaDirection(parent context.Context, client *http.Client, method, target string, duration time.Duration, progress func(SpeedProgress), phase string) (float64, error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -228,8 +256,10 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 			defer wg.Done()
 			for ctx.Err() == nil {
 				var body io.Reader
+				var uploadBody *ooklaCountingReader
 				if method == http.MethodPost {
-					body = bytes.NewReader(payload)
+					uploadBody = &ooklaCountingReader{reader: bytes.NewReader(payload)}
+					body = uploadBody
 				}
 				req, err := http.NewRequestWithContext(ctx, method, target, body)
 				if err != nil {
@@ -279,6 +309,10 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 						if ctx.Err() == nil {
 							errOnce.Do(func() { firstErr = copyErr })
 						}
+						return
+					}
+					if sent := uploadBody.count.Load(); sent != int64(len(payload)) {
+						errOnce.Do(func() { firstErr = fmt.Errorf("upload server confirmed an incomplete body: %d/%d bytes", sent, len(payload)) })
 						return
 					}
 					transferred.Add(int64(len(payload)))
