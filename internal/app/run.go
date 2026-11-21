@@ -315,7 +315,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 3 starts only after every speed test has completed. No service check
 	// is run on a node that failed either speed threshold.
 	fmt.Fprintf(stdout, "\n[4/4] SERVICE CHECK: %d speed-passed nodes, Gemini must be fully available\n", len(speedPassed))
-	serviceResults, _ := runStageWithLiveCallback(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return n.GeminiStatus == "available" }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	serviceResults, _ := runStageWithLiveCallback(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "Gemini: checking…"))
 		status, note, region, ipInfo, testErr := runServiceCheck(stageCtx, *n, opts)
 		n.GeminiStatus, n.GeminiNote, n.GeminiRegion = status, note, region
@@ -335,7 +335,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		live(*n, detail)
 	}, nil)
-	finalCandidates := filterNodes(serviceResults, func(n sub.Node) bool { return n.GeminiStatus == "available" })
+	finalCandidates := filterNodes(serviceResults, func(n sub.Node) bool { return geminiAvailable(n) })
 	// Each node is tested exactly once per enabled stage: URL, speed, then Gemini.
 	// There is deliberately no final recheck stage; it duplicated URL and Gemini requests.
 	finalNodes := finalCandidates
@@ -1035,7 +1035,13 @@ func formatMbps(value float64, _ int) string {
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
 	var status, note, region string
 	var info check.IPDetails
-	err := withNodeClient(parent, n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
+	err := withNodeProxy(parent, n, opts, opts.ServiceTimeout, func(ctx context.Context, proxyURL string) error {
+		client, clientErr := check.NewGeminiClient(proxyURL, opts.ServiceTimeout)
+		if clientErr != nil {
+			return clientErr
+		}
+		defer check.CloseClient(client)
+
 		serviceCtx, cancel := context.WithTimeout(ctx, opts.ServiceTimeout)
 		defer cancel()
 		var serviceErr error
@@ -1067,6 +1073,19 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 	}
 	defer check.CloseClient(client)
 	return fn(startCtx, client)
+}
+
+// withNodeProxy exposes the local sing-box HTTP CONNECT endpoint so Gemini can
+// use Throne-compatible TLS/HTTP2 without changing the other test stages.
+func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string) error) error {
+	startCtx, cancel := context.WithTimeout(parent, timeout+8*time.Second)
+	defer cancel()
+	inst, err := core.Start(startCtx, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
+	if err != nil {
+		return fmt.Errorf("start proxy: %w", err)
+	}
+	defer inst.Close()
+	return fn(startCtx, inst.ProxyURL)
 }
 
 func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {

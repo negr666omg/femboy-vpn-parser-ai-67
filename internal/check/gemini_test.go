@@ -15,8 +15,13 @@ func TestClassifyGemini(t *testing.T) {
 		name, url, body, want string
 		code                  int
 	}{
-		{"full flag", "https://gemini.google.com/app?hl=en", `x45631641":true y`, "available", 200},
-		{"partial flag", "https://gemini.google.com/app?hl=en", `x45631641,null,false y`, "partial", 200},
+		{"full flag escaped marker", "https://gemini.google.com/app?hl=en", `x45631641\":true y`, "available", 200},
+		{"full flag plain JSON marker", "https://gemini.google.com/app?hl=en", `{"45631641":true}`, "available", 200},
+		{"full flag comma marker", "https://gemini.google.com/app?hl=en", `45631641,null,true`, "available", 200},
+		{"partial flag escaped marker", "https://gemini.google.com/app?hl=en", `x45631641,null,false y`, "partial", 200},
+		{"partial flag plain JSON marker", "https://gemini.google.com/app?hl=en", `{"45631641":false}`, "partial", 200},
+		{"nearby marker is not a match", "https://gemini.google.com/app?hl=en", `{"145631641":true}`, "unknown", 200},
+        {"nearby false marker is not a match", "https://gemini.google.com/app?hl=en", `{"145631641":false}`, "unknown", 200},
 		{"consent", "https://consent.google.com/m?continue=gemini", `45631641":true`, "unknown", 200},
 		{"blocked 403", "https://gemini.google.com/app", ``, "blocked", 403},
 		{"rate limited", "https://gemini.google.com/app", ``, "blocked", 429},
