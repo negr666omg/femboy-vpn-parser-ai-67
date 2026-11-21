@@ -362,8 +362,11 @@ func TestGeminiFileToggleSeparatesGeminiSubscriptions(t *testing.T) {
 			t.Fatalf("expected separate Gemini file %s: %v", name, err)
 		}
 	}
-	if !strings.Contains(geminiNodes[0].URI, "#fast") {
-		t.Fatal("separate Gemini mode unexpectedly renamed node")
+	if !strings.HasSuffix(geminiNodes[0].Name, geminiNameSuffix) || !strings.Contains(geminiNodes[0].URI, "Gemini") {
+		t.Fatalf("dedicated Gemini list is missing its marker: name=%q uri=%q", geminiNodes[0].Name, geminiNodes[0].URI)
+	}
+	if !strings.Contains(string(mustRead(t, filepath.Join(dir, "gemini.txt"))), "Gemini") {
+		t.Fatal("dedicated Gemini text file is missing its name marker")
 	}
 	if strings.Contains(string(mustRead(t, filepath.Join(dir, "url-test-finished.txt"))), "Gemini") {
 		t.Fatal("separate Gemini mode modified earlier stage files")
@@ -907,10 +910,12 @@ func TestURLStageExportsCountryNameWithoutUnmeasuredSpeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := urlStageNodeName("DE")
-	if name != "🇩🇪" {
-		t.Fatalf("URL-stage name = %q, want country flag only", name)
+	if name != "🇩🇪 Germany" {
+		t.Fatalf("URL-stage name = %q, want flag and country name", name)
 	}
-	sub.RenameNode(&node, name)
+	if err := sub.RenameNode(&node, name); err != nil {
+		t.Fatal(err)
+	}
 	node.URLPassed = true
 
 	dir := t.TempDir()
@@ -925,11 +930,84 @@ func TestURLStageExportsCountryNameWithoutUnmeasuredSpeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse exported URL-stage subscription: %v", err)
 	}
-	if exported.Name != "🇩🇪" {
+	if exported.Name != "🇩🇪 Germany" {
 		t.Fatalf("exported URL-stage name = %q", exported.Name)
 	}
 	if strings.Contains(exported.Name, "↓") || strings.Contains(exported.Name, "↑") {
 		t.Fatalf("URL-stage name contains speed that has not been measured: %q", exported.Name)
+	}
+}
+
+func TestNodeNameAddsCountryToExistingCustomTemplate(t *testing.T) {
+	// Existing config.json files may still use the old template. It should
+	// automatically gain the country placeholder without user edits.
+	got := renderNodeName("{flag} {download}↓{upload}↑", "DE", 72.4, 31.6)
+	want := "🇩🇪 Germany 72↓32↑"
+	if got != want {
+		t.Fatalf("renderNodeName() = %q, want %q", got, want)
+	}
+}
+
+func TestCountryLookupParsesConfiguredGeoIPProvider(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/json" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"country_code":"NL","country":"Netherlands"}`))
+	}))
+	defer server.Close()
+
+	got := lookupCountry(context.Background(), server.Client(), server.URL+"/json")
+	if got != "NL" {
+		t.Fatalf("lookupCountry() = %q, want NL", got)
+	}
+}
+
+func TestCountryLabelSupportsCommonExitRegions(t *testing.T) {
+	tests := []struct {
+		code, want string
+	}{
+		{"DE", "🇩🇪 Germany"},
+		{"NL", "🇳🇱 Netherlands"},
+		{"IR", "🇮🇷 Iran"},
+		{"RU", "🇷🇺 Russia"},
+	}
+	for _, test := range tests {
+		if got := urlStageNodeName(test.code); got != test.want {
+			t.Errorf("urlStageNodeName(%q) = %q, want %q", test.code, got, test.want)
+		}
+	}
+}
+
+func TestNodeNameUsesExplicitUnknownFallback(t *testing.T) {
+	got := renderNodeName("{flag} {country} {download}↓{upload}↑", "", 0, 0)
+	want := "🌐 Unknown 0↓0↑"
+	if got != want {
+		t.Fatalf("renderNodeName() = %q, want %q", got, want)
+	}
+}
+
+func TestMeasuredNodeNamesRefreshAllAndURLLists(t *testing.T) {
+	dir := t.TempDir()
+	parsed := []sub.Node{{Key: "same", Protocol: "vless", Name: "source label", URI: "vless://node#source"}}
+	urlNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇩🇪 Germany", URI: "vless://node#country", URLPassed: true}}
+	measured := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇩🇪 Germany 72↓32↑", URI: "vless://node#🇩🇪 Germany 72↓32↑", URLPassed: true, DownloadMbps: 72, UploadMbps: 32}}
+
+	applyNodeUpdatesByIdentity(parsed, measured)
+	applyNodeUpdatesByIdentity(urlNodes, measured)
+	if err := writeSubscription(filepath.Join(dir, "all.txt"), parsed); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"all.txt", "url-test-finished.txt", "url-test-finished-vless.txt"} {
+		data := string(mustRead(t, filepath.Join(dir, name)))
+		if !strings.Contains(data, "🇩🇪 Germany 72↓32↑") {
+			t.Fatalf("%s did not receive the measured name: %q", name, data)
+		}
 	}
 }
 

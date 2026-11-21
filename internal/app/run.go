@@ -23,6 +23,9 @@ import (
 	"unicode"
 	"unsafe"
 
+	"golang.org/x/text/language"
+	"golang.org/x/text/language/display"
+
 	"github.com/negr666omg/subwatch/internal/check"
 	"github.com/negr666omg/subwatch/internal/core"
 	"github.com/negr666omg/subwatch/internal/sub"
@@ -365,8 +368,12 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		} else if !passed {
 			n.URLError = "URL test returned non-success status"
 		}
-		if passed && opts.RenameNodes {
-			n.RenameError = renameNodeAfterURL(stageCtx, n, opts)
+		if opts.RenameNodes {
+			if passed {
+				n.RenameError = renameNodeAfterURL(stageCtx, n, opts)
+			} else if err := sub.RenameNode(n, urlStageNodeName("")); err != nil {
+				n.RenameError = err.Error()
+			}
 		}
 		live(*n, urlLiveDetail(*n))
 	}, func(completed sub.Node) error {
@@ -382,6 +389,15 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return stageErr
 	}
 	urlPassed := filterNodes(urlResults, func(n sub.Node) bool { return n.URLPassed })
+	// Keep every selected node's remark synchronized in all.txt too. Nodes
+	// that fail URL reachability cannot have a meaningful country/speed result,
+	// so they receive the explicit 🌐 Unknown fallback rather than the source name.
+	if opts.RenameNodes {
+		applyNodeUpdatesByIdentity(parsed, urlResults)
+		if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
+			return err
+		}
+	}
 	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
 		return err
 	}
@@ -397,26 +413,50 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			live(*n, speedProgressDetail(*n, progress))
 		})
 		n.DownloadMbps, n.UploadMbps = down, up
+
+		// Rename every node with the measurements we did obtain, including
+		// nodes that miss a threshold or lose one transfer direction.
+		if opts.RenameNodes {
+			n.RenameError = renameNodeAfterSpeed(stageCtx, n, opts, down, up)
+		}
 		if testErr != nil {
 			n.SpeedError = testErr.Error()
-			live(*n, speedLiveDetail(*n, "FAILED: "+shortLiveError(testErr.Error())))
+			detail := speedLiveDetail(*n, "FAILED: "+shortLiveError(testErr.Error()))
+			if n.RenameError != "" {
+				detail += " | rename: " + shortLiveError(n.RenameError)
+			}
+			live(*n, detail)
 			return
 		}
 		if reason := speedThresholdError(down, up, opts.MinDownload, opts.MinUpload); reason != "" {
 			n.SpeedError = reason
-			live(*n, speedLiveDetail(*n, "FAILED: "+shortLiveError(reason)))
+			detail := speedLiveDetail(*n, "FAILED: "+shortLiveError(reason))
+			if n.RenameError != "" {
+				detail += " | rename: " + shortLiveError(n.RenameError)
+			}
+			live(*n, detail)
 			return
 		}
 		n.SpeedPassed = true
 		speedState := "PASS"
-		if opts.RenameNodes {
-			n.RenameError = renameNodeAfterSpeed(stageCtx, n, opts, down, up)
-			if n.RenameError != "" {
-				speedState += " | rename: " + shortLiveError(n.RenameError)
-			}
+		if n.RenameError != "" {
+			speedState += " | rename: " + shortLiveError(n.RenameError)
 		}
 		live(*n, speedLiveDetail(*n, speedState))
 	}, nil)
+
+	// Speed testing changes display names after the URL-stage file was first
+	// written. Propagate the final URI remarks by identity and refresh both
+	// earlier output groups, not just nodes that later pass Gemini.
+	applyNodeUpdatesByIdentity(parsed, speedResults)
+	applyNodeUpdatesByIdentity(urlPassed, speedResults)
+	if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
+		return err
+	}
+	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+		return err
+	}
+
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
 	if err := writeStageFiles(opts.OutDir, "speed-test-finished", speedPassed, true); err != nil {
@@ -1370,22 +1410,63 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 
 
 func urlStageNodeName(country string) string {
-	return countryFlag(strings.ToUpper(strings.TrimSpace(country)))
+	flag, name := countryLabel(country)
+	return flag + " " + name
+}
+
+// countryLabel converts a two-letter ISO code into a stable flag and English
+// country name. Unknown locations are still renamed instead of preserving a
+// stale subscription remark.
+func countryLabel(country string) (string, string) {
+	code := strings.ToUpper(strings.TrimSpace(country))
+	flag := countryFlag(code)
+	if flag == "" {
+		return "🌐", "Unknown"
+	}
+	region, err := language.ParseRegion(code)
+	if err != nil {
+		return flag, "Unknown"
+	}
+	name := strings.TrimSpace(display.English.Regions().Name(region))
+	if name == "" || strings.EqualFold(name, code) {
+		name = "Unknown"
+	}
+	return flag, name
+}
+
+func ensureCountryPlaceholder(template string) string {
+	if strings.Contains(template, "{country}") {
+		return template
+	}
+	if strings.Contains(template, "{flag}") {
+		return strings.Replace(template, "{flag}", "{flag} {country}", 1)
+	}
+	return "{country} " + template
+}
+
+func renderNodeName(template, country string, download, upload float64) string {
+	flag, countryName := countryLabel(country)
+	template = ensureCountryPlaceholder(template)
+	return strings.NewReplacer(
+		"{flag}", flag,
+		"{country}", countryName,
+		"{download}", formatMbps(download, 0),
+		"{upload}", formatMbps(upload, 0),
+	).Replace(template)
 }
 
 func renameNodeAfterURL(parent context.Context, n *sub.Node, opts Options) string {
 	if n == nil {
 		return "cannot rename a nil node"
 	}
-	if err := ensureNodeCountry(parent, n, opts); err != nil {
+	countryErr := ensureNodeCountry(parent, n, opts)
+	name := urlStageNodeName(n.Country)
+	if err := sub.RenameNode(n, name); err != nil {
 		return err.Error()
 	}
-	name := urlStageNodeName(n.Country)
-	if name == "" {
-		return "GeoIP country lookup returned an invalid country code"
+	if countryErr != nil {
+		return countryErr.Error() + "; renamed with Unknown country"
 	}
-	// Speed placeholders are intentionally omitted until both measurements exist.
-	sub.RenameNode(n, name)
 	return ""
 }
 
@@ -1393,26 +1474,21 @@ func renameNodeAfterSpeed(parent context.Context, n *sub.Node, opts Options, dow
 	if n == nil {
 		return "cannot rename a nil node"
 	}
-	if err := ensureNodeCountry(parent, n, opts); err != nil {
-		return err.Error()
-	}
-	flag := countryFlag(n.Country)
-	if flag == "" {
-		return "GeoIP country lookup returned an invalid country code"
-	}
+	countryErr := ensureNodeCountry(parent, n, opts)
 	template := opts.NameFormat
 	if template == "" {
 		template = DefaultOptions().NameFormat
 	}
-	name := strings.NewReplacer(
-		"{flag}", flag,
-		"{download}", formatMbps(download, opts.SpeedDecimals),
-		"{upload}", formatMbps(upload, opts.SpeedDecimals),
-	).Replace(template)
+	name := renderNodeName(template, n.Country, download, upload)
 	if strings.TrimSpace(name) == "" {
 		return "service_check.name_format produced an empty node name"
 	}
-	sub.RenameNode(n, name)
+	if err := sub.RenameNode(n, name); err != nil {
+		return err.Error()
+	}
+	if countryErr != nil {
+		return countryErr.Error() + "; renamed with Unknown country"
+	}
 	return ""
 }
 
@@ -1425,11 +1501,15 @@ func ensureNodeCountry(parent context.Context, n *sub.Node, opts Options) error 
 		return nil
 	}
 	return withNodeClient(parent, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
-		country := lookupCountry(ctx, client, opts.GeoIPURL)
-		if countryFlag(country) == "" {
-			// Retry with independent public GeoIP providers if the configured endpoint
-			// is unavailable or does not return a usable ISO country code.
-			country = check.LookupIP(ctx, client).Country
+		// Bound each GeoIP provider independently. A stalled first provider
+		// must not consume the entire service timeout and prevent fallbacks.
+		geoCtx, cancelGeo := context.WithTimeout(ctx, 10*time.Second)
+		country := lookupCountry(geoCtx, client, opts.GeoIPURL)
+		cancelGeo()
+		if country == "" {
+			fallbackCtx, cancelFallback := context.WithTimeout(ctx, 6*time.Second)
+			country = check.LookupIP(fallbackCtx, client).Country
+			cancelFallback()
 		}
 		country = strings.ToUpper(strings.TrimSpace(country))
 		if countryFlag(country) == "" {
@@ -1441,17 +1521,69 @@ func ensureNodeCountry(parent context.Context, n *sub.Node, opts Options) error 
 }
 
 func lookupCountry(ctx context.Context, client *http.Client, endpoint string) string {
-	if endpoint == "" { endpoint = "https://ipwho.is/" }
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil { return "" }
-	resp, err := client.Do(req)
-	if err != nil { return "" }
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 { return "" }
-	var data map[string]any
-	if json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&data) != nil { return "" }
-	code, _ := data["country_code"].(string)
-	return strings.ToUpper(strings.TrimSpace(code))
+	if client == nil {
+		return ""
+	}
+	if strings.TrimSpace(endpoint) == "" {
+		endpoint = "https://ipwho.is/"
+	}
+	endpoints := []string{endpoint, "https://ipapi.co/json/", "https://api.country.is/"}
+	seen := make(map[string]bool, len(endpoints))
+	for _, target := range endpoints {
+		target = strings.TrimSpace(target)
+		if target == "" || seen[target] {
+			continue
+		}
+		seen[target] = true
+		reqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, target, nil)
+		if err != nil {
+			cancel()
+			continue
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "SubWatch/0.4 GeoIP")
+		resp, err := client.Do(req)
+		if err == nil {
+			var data map[string]any
+			decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 65536)).Decode(&data)
+			_ = resp.Body.Close()
+			cancel()
+			if decodeErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				if code := countryCodeFromResponse(data); code != "" {
+					return code
+				}
+			}
+		} else {
+			cancel()
+		}
+		if ctx.Err() != nil {
+			return ""
+		}
+	}
+	return ""
+}
+
+func countryCodeFromResponse(data map[string]any) string {
+	for _, key := range []string{"country_code", "countryCode", "country"} {
+		if value, ok := data[key].(string); ok {
+			value = strings.ToUpper(strings.TrimSpace(value))
+			if countryFlag(value) != "" {
+				return value
+			}
+		}
+	}
+	if location, ok := data["location"].(map[string]any); ok {
+		for _, key := range []string{"country_code", "countryCode", "country"} {
+			if value, ok := location[key].(string); ok {
+				value = strings.ToUpper(strings.TrimSpace(value))
+				if countryFlag(value) != "" {
+					return value
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func countryFlag(code string) string {
@@ -1573,7 +1705,12 @@ const geminiNameSuffix = " Gemini 🐱"
 // When disabled, it marks those nodes and refreshes every earlier stage list so
 // the marker is present wherever the same node appears.
 func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes []sub.Node, separateFile bool) error {
+	if err := markGeminiNodes(geminiNodes); err != nil {
+		return err
+	}
 	if separateFile {
+		// Keep the dedicated Gemini list's URI remarks consistent with the
+		// marked names used in the combined lists.
 		return writeStageFiles(dir, "gemini", geminiNodes, true)
 	}
 	if err := os.Remove(filepath.Join(dir, "gemini.txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1583,7 +1720,6 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 		return err
 	}
 
-	markGeminiNodes(geminiNodes)
 	for _, group := range [][]sub.Node{allNodes, urlNodes, speedNodes} {
 		applyNodeUpdatesByIdentity(group, geminiNodes)
 	}
@@ -1596,7 +1732,7 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 	return writeStageFiles(dir, "speed-test-finished", speedNodes, true)
 }
 
-func markGeminiNodes(nodes []sub.Node) {
+func markGeminiNodes(nodes []sub.Node) error {
 	for i := range nodes {
 		if !geminiAvailable(nodes[i]) {
 			continue
@@ -1608,11 +1744,11 @@ func markGeminiNodes(nodes []sub.Node) {
 		if name == "" {
 			name = nodes[i].Protocol
 		}
-		if nodes[i].Outbound == nil {
-			nodes[i].Outbound = make(map[string]any)
+		if err := sub.RenameNode(&nodes[i], name+geminiNameSuffix); err != nil {
+			return fmt.Errorf("rename Gemini node %s: %w", nodes[i].Protocol, err)
 		}
-		sub.RenameNode(&nodes[i], name+geminiNameSuffix)
 	}
+	return nil
 }
 
 func applyNodeUpdatesByIdentity(nodes, updates []sub.Node) {

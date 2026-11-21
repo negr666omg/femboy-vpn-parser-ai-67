@@ -558,40 +558,54 @@ func parseHTTP(u *url.URL) (map[string]any, error) {
 }
 
 // RenameNode updates both the exported node name and the URI remark consumed by subscription clients.
-func RenameNode(n *Node, name string) {
-	if n == nil || strings.TrimSpace(name) == "" {
-		return
+// An error is returned instead of silently leaving the original remark untouched.
+func RenameNode(n *Node, name string) error {
+	if n == nil {
+		return errors.New("cannot rename a nil node")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("cannot rename a node to an empty name")
 	}
 	u, err := url.Parse(n.URI)
 	if err != nil {
-		return
+		return fmt.Errorf("parse node URI: %w", err)
 	}
 
 	if strings.EqualFold(u.Scheme, "vmess") {
-		if payload, decodeErr := decodeBase64(vmessPayload(u)); decodeErr == nil {
-			var config map[string]json.RawMessage
-			if json.Unmarshal(payload, &config) == nil {
-				if encodedName, marshalErr := json.Marshal(name); marshalErr == nil {
-					config["ps"] = encodedName
-					if updated, marshalErr := json.Marshal(config); marshalErr == nil {
-						// Keep the whole Base64 payload opaque. VMess JSON may encode
-						// slash characters, which a hierarchical URL parser treats as a path.
-						u.Opaque = "//" + base64.StdEncoding.EncodeToString(updated)
-						u.User = nil
-						u.Host = ""
-						u.Path = ""
-						u.RawPath = ""
-					}
-				}
-			}
+		payload, decodeErr := decodeBase64(vmessPayload(u))
+		if decodeErr != nil {
+			return fmt.Errorf("decode VMess payload while renaming: %w", decodeErr)
 		}
+		var config map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &config); err != nil {
+			return fmt.Errorf("decode VMess JSON while renaming: %w", err)
+		}
+		encodedName, err := json.Marshal(name)
+		if err != nil {
+			return fmt.Errorf("encode VMess remark: %w", err)
+		}
+		config["ps"] = encodedName
+		updated, err := json.Marshal(config)
+		if err != nil {
+			return fmt.Errorf("encode VMess payload: %w", err)
+		}
+		// Keep the whole Base64 payload opaque. VMess JSON may encode slash
+		// characters, which a hierarchical URL parser treats as a path.
+		u.Opaque = "//" + base64.StdEncoding.EncodeToString(updated)
+		u.User = nil
+		u.Host = ""
+		u.Path = ""
+		u.RawPath = ""
 	}
 
 	u.Fragment = name
+	u.RawFragment = ""
 	n.URI = u.String()
 	n.Name = name
 	if n.Outbound == nil {
 		n.Outbound = make(map[string]any)
 	}
 	n.Outbound["_name"] = name
+	return nil
 }
