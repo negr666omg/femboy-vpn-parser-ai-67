@@ -288,7 +288,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := writeInvalidLines(filepath.Join(opts.OutDir, "invalid.txt"), invalidConfigs); err != nil {
 		return fmt.Errorf("write invalid configs: %w", err)
 	}
-	fmt.Fprintf(stdout, "Invalid configs saved: %d -> %s\\n", len(invalidConfigs), filepath.Join(opts.OutDir, "invalid.txt"))
+	fmt.Fprintf(stdout, "Invalid configs saved: %d -> %s\n", len(invalidConfigs), filepath.Join(opts.OutDir, "invalid.txt"))
 	if len(parsed) == 0 {
 		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
 	}
