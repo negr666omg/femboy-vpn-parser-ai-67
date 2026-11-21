@@ -98,6 +98,7 @@ func TestOoklaSpeedTestRejectsEmptyServerList(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "empty server list") {
 		t.Fatalf("expected empty server-list error, got %v", err)
 	}
+}
 
 func TestOoklaRateSamplerReturnsSustainedRollingPeak(t *testing.T) {
 	start := time.Unix(100, 0)
@@ -179,4 +180,3 @@ func TestOoklaSpeedTestSurvivesIndividualRequestFailures(t *testing.T) {
 	}
 }
 
-}
