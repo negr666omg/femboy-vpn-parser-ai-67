@@ -90,6 +90,119 @@ type sourceQualityStats struct {
 	SharedGemini int
 }
 
+const stableNameSuffix = " 🧱"
+
+// StabilityState keeps the intersection of passing nodes across completed
+// continuous-mode cycles. It is shared by the CLI's outer loop.
+type StabilityState struct {
+	mu          sync.Mutex
+	started     bool
+	cycles      int
+	stableURL   map[string]struct{}
+	stableSpeed map[string]struct{}
+}
+
+func NewStabilityState() *StabilityState {
+	return &StabilityState{}
+}
+
+func (s *StabilityState) prepareOutput(dir string) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started {
+		return nil
+	}
+	if err := removeStableOutputArtifacts(dir); err != nil {
+		return err
+	}
+	s.started = true
+	return nil
+}
+
+func (s *StabilityState) advance(urlResults, speedResults []sub.Node, maxPingMS int64, minDownload, minUpload float64) ([]sub.Node, []sub.Node, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	urlCandidates := make(map[string]struct{})
+	for _, n := range urlResults {
+		if n.URLPassed && n.URLLatencyMS >= 0 && n.URLLatencyMS < maxPingMS {
+			urlCandidates[nodeDedupKey(n)] = struct{}{}
+		}
+	}
+	speedCandidates := make(map[string]struct{})
+	for _, n := range speedResults {
+		if n.URLPassed && n.URLLatencyMS >= 0 && n.URLLatencyMS < maxPingMS &&
+			n.SpeedPassed && speedThresholdError(n.DownloadMbps, n.UploadMbps, minDownload, minUpload) == "" {
+			speedCandidates[nodeDedupKey(n)] = struct{}{}
+		}
+	}
+
+	if s.cycles == 0 {
+		s.stableURL = urlCandidates
+		s.stableSpeed = speedCandidates
+	} else {
+		s.stableURL = intersectStabilitySet(s.stableURL, urlCandidates)
+		s.stableSpeed = intersectStabilitySet(s.stableSpeed, speedCandidates)
+	}
+	s.cycles++
+	return nodesInStabilitySet(urlResults, s.stableURL), nodesInStabilitySet(speedResults, s.stableSpeed), s.cycles
+}
+
+func intersectStabilitySet(previous, current map[string]struct{}) map[string]struct{} {
+	next := make(map[string]struct{})
+	for key := range current {
+		if _, existed := previous[key]; existed {
+			next[key] = struct{}{}
+		}
+	}
+	return next
+}
+
+func nodesInStabilitySet(nodes []sub.Node, set map[string]struct{}) []sub.Node {
+	out := make([]sub.Node, 0, len(set))
+	seen := make(map[string]struct{}, len(set))
+	for _, n := range nodes {
+		key := nodeDedupKey(n)
+		if _, ok := set[key]; !ok {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+func markStableNodes(nodes, stable []sub.Node) error {
+	stableKeys := nodeKeySet(stable)
+	for i := range nodes {
+		if _, ok := stableKeys[nodeDedupKey(nodes[i])]; !ok {
+			continue
+		}
+		name := strings.TrimSpace(nodes[i].Name)
+		if name == "" {
+			name = protocolOf(nodes[i])
+		}
+		hasGemini := strings.HasSuffix(name, geminiNameSuffix)
+		name = strings.TrimSuffix(name, geminiNameSuffix)
+		if !strings.HasSuffix(name, stableNameSuffix) {
+			name += stableNameSuffix
+		}
+		if hasGemini {
+			name += geminiNameSuffix
+		}
+		if err := sub.RenameNode(&nodes[i], name); err != nil {
+			return fmt.Errorf("mark stable node %s: %w", protocolOf(nodes[i]), err)
+		}
+	}
+	return nil
+}
+
 func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.URLConcurrency < 1 || opts.URLConcurrency > 64 {
 		return fmt.Errorf("url_test.concurrency must be between 1 and 64")
@@ -105,6 +218,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	if opts.MinDownload < 0 || opts.MinUpload < 0 {
 		return fmt.Errorf("minimum speeds cannot be negative")
+	}
+	if opts.StabilityMaxPingMS <= 0 {
+		opts.StabilityMaxPingMS = 100
 	}
 	if opts.Interface == "" {
 		opts.Interface = "auto"
@@ -358,7 +474,12 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Preserve the previous successful output if setup or source loading failed.
 	// Once the current sources have been parsed, remove stale generated files
 	// immediately before writing this run's results.
-	if err := cleanOutputArtifacts(opts.OutDir); err != nil {
+	if opts.StabilityState != nil {
+		if err := opts.StabilityState.prepareOutput(opts.OutDir); err != nil {
+			return fmt.Errorf("prepare stability output: %w", err)
+		}
+	}
+	if err := cleanOutputArtifacts(opts.OutDir, opts.StabilityState != nil); err != nil {
 		return fmt.Errorf("clean output directory: %w", err)
 	}
 	var failedItems []failureRecord
@@ -590,8 +711,50 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Each node is tested exactly once per enabled stage: URL, speed, then Gemini.
 	// There is deliberately no final recheck stage; it duplicated URL and Gemini requests.
 	finalNodes := finalCandidates
+	var stableURLNodes, stableSpeedNodes []sub.Node
+	if opts.StabilityState != nil {
+		stableURLNodes, stableSpeedNodes, stabilityCycle := opts.StabilityState.advance(
+			urlResults, speedResults, opts.StabilityMaxPingMS, opts.MinDownload, opts.MinUpload,
+		)
+		applyNodeUpdatesByIdentity(stableURLNodes, speedResults)
+		for _, item := range []struct {
+			nodes  []sub.Node
+			stable []sub.Node
+		}{
+			{nodes: parsed, stable: stableURLNodes},
+			{nodes: urlPassed, stable: stableURLNodes},
+			{nodes: speedPassed, stable: stableSpeedNodes},
+			{nodes: finalNodes, stable: stableSpeedNodes},
+		} {
+			if err := markStableNodes(item.nodes, item.stable); err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(stdout, "[STABILITY] completed cycles: %d | URL-stable (<%d ms): %d | speed-stable (<%d ms and both speed minimums): %d\n",
+			stabilityCycle, opts.StabilityMaxPingMS, len(stableURLNodes), opts.StabilityMaxPingMS, len(stableSpeedNodes))
+	}
 	if err := writeGeminiResults(opts.OutDir, finalNodes, parsed, urlPassed, speedPassed, opts.GeminiFile); err != nil {
 		return err
+	}
+	if opts.StabilityState != nil {
+		// Keep Gemini's suffix in the stable snapshots too: "... 🧱 Gemini 🐱".
+		applyNodeUpdatesByIdentity(stableURLNodes, finalNodes)
+		applyNodeUpdatesByIdentity(stableSpeedNodes, finalNodes)
+		if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "speedtested", speedPassed, true); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "stable-url-tested", stableURLNodes, true); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "stable-speedtested", stableSpeedNodes, true); err != nil {
+			return err
+		}
 	}
 
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
@@ -2056,7 +2219,34 @@ func outputProtocolNames() []string {
 	}
 }
 
-func cleanOutputArtifacts(dir string) error {
+func removeStableOutputArtifacts(dir string) error {
+	for _, base := range []string{"stable-url-tested", "stable-speedtested"} {
+		for _, name := range stableProtocolOutputNames(base) {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if err := os.Remove(filepath.Join(dir, base+".txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func stableProtocolOutputNames(base string) []string {
+	names := make([]string, 0, len(outputProtocolNames()))
+	for _, protocol := range outputProtocolNames() {
+		names = append(names, base+"-"+protocol+".txt")
+	}
+	return names
+}
+
+func cleanOutputArtifacts(dir string, preserveStability ...bool) error {
+	if len(preserveStability) == 0 || !preserveStability[0] {
+		if err := removeStableOutputArtifacts(dir); err != nil {
+			return err
+		}
+	}
 	known := []string{
 		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
 		"speedtested.txt", "speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "failed.txt", "tested.txt", "service-check-results.txt",
