@@ -154,9 +154,6 @@ func LoadOptions(path string) (Options, error) {
 		opts.Interface = cfg.Network.Interface
 	}
 	opts.IsolateSourceDownloads = cfg.Network.IsolateSourceDownloads
-	if opts.IsolateSourceDownloads && opts.Interface == "auto" {
-		return opts, fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
-	}
 	if cfg.Sources.File != "" {
 		opts.Sources = cfg.Sources.File
 	}
