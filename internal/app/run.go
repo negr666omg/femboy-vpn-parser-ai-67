@@ -230,6 +230,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 				sourceProgressMouseRowQueried = true
 				if row, ok := liveMouse.cursorRow(); ok {
 					sourceProgressMouseRow = row
+				} else {
+					// Do not leave mouse reporting enabled on terminals that do
+					// not answer cursor-position requests; selection must still work.
+					liveMouse.Close()
+					liveMouse = nil
 				}
 			}
 			if sourceProgressMouseRow > 0 {
@@ -1319,9 +1324,12 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 					if row, ok := mouse.cursorRow(); ok {
 						terminalLastRow = row
 						terminalRowsKnown = true
+					} else {
+						mouse.Close()
+						mouse = nil
 					}
 				}
-				if terminalRowsKnown {
+				if mouse != nil && terminalRowsKnown {
 					targets := make([]liveMouseTarget, 0, len(statuses))
 					for i, status := range statuses {
 						line := formatLiveWorkerStatusLine(label, i+1, status.node, status.detail, terminalWidth)
