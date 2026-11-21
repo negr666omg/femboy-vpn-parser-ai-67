@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"errors"
 
 	"github.com/negr666omg/subwatch/internal/sub"
 )
@@ -1018,10 +1019,92 @@ func TestLiveStatusShowsUnavailablePingUntilURLPasses(t *testing.T) {
 	}
 }
 
+func TestRetryOnConnectionErrorDefaultsDisabled(t *testing.T) {
+	if DefaultOptions().RetryOnConnectionError {
+		t.Fatal("network.retry_on_connection_error must default to false")
+	}
+}
+
+func TestRetryOnConnectionErrorConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"network":{"retry_on_connection_error":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := LoadOptions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opts.RetryOnConnectionError {
+		t.Fatal("network.retry_on_connection_error was not loaded")
+	}
+}
+
+func TestTransientNetworkErrorClassification(t *testing.T) {
+	for _, message := range []string{
+		"dial tcp: i/o timeout",
+		"ssh: connect to host example.test port 22: Connection timed out",
+		"connect: connection refused",
+		"network is unreachable",
+		"temporary failure in name resolution",
+		"download sing-box: HTTP 503 Service Unavailable",
+		"no DHCPOFFERS received",
+	} {
+		if !isTransientNetworkError(errors.New(message)) {
+			t.Errorf("expected transient network classification for %q", message)
+		}
+	}
+	for _, message := range []string{
+		"SSH private key does not exist",
+		"Permission denied (publickey)",
+		"sing-box checksum mismatch",
+		"server returned HTTP 404",
+		"output directory is not writable",
+		"invalid url_test.timeout",
+	} {
+		if isTransientNetworkError(errors.New(message)) {
+			t.Errorf("permanent/non-network error must not be retried: %q", message)
+		}
+	}
+	if !isTransientNetworkError(context.DeadlineExceeded) {
+		t.Fatal("network deadline should be treated as transient")
+	}
+}
+
+func TestAllSourcesFailedWithTransientConnections(t *testing.T) {
+	sources := []loadedSource{
+		{Reference: "https://one.example/sub", LoadError: errors.New("timeout"), TransientConnectionError: true},
+		{Reference: "http://two.example/sub", LoadError: errors.New("connection refused"), TransientConnectionError: true},
+	}
+	if !allSourcesFailedWithTransientConnections(sources) {
+		t.Fatal("all remote sources with transient errors should be retryable")
+	}
+	sources[0].Reference = "./local.txt"
+	if allSourcesFailedWithTransientConnections(sources) {
+		t.Fatal("local file failures must not be classified as remote connection failures")
+	}
+	sources[0].Reference = "https://one.example/sub"
+	sources[1].TransientConnectionError = false
+	if allSourcesFailedWithTransientConnections(sources) {
+		t.Fatal("permanent HTTP/source failures must not be retried")
+	}
+}
+
+func TestRetryableConnectionErrorIsRecognizedThroughWrapping(t *testing.T) {
+	err := newRetryableConnectionError("fetch sources", errors.New("timeout"))
+	if !IsRetryableConnectionError(fmt.Errorf("run: %w", err)) {
+		t.Fatal("wrapped retryable connection error was not recognized")
+	}
+	if IsRetryableConnectionError(errors.New("permission denied")) {
+		t.Fatal("permanent error was incorrectly recognized as retryable")
+	}
+}
+
 func TestRemoteUploadConfigAndDefaults(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	config := `{
+  "network": {"retry_on_connection_error": true},
   "remote_upload": {
     "enabled": true,
     "method": "sftp",
@@ -1040,7 +1123,7 @@ func TestRemoteUploadConfigAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !opts.RemoteUpload.Enabled || opts.RemoteUpload.Method != "sftp" || opts.RemoteUpload.Port != 2222 || opts.RemoteUpload.Auth != "private_key" {
+	if !opts.RemoteUpload.Enabled || opts.RemoteUpload.Method != "sftp" || opts.RemoteUpload.Port != 2222 || opts.RemoteUpload.Auth != "private_key" || !opts.RemoteUpload.RetryOnConnectionError {
 		t.Fatalf("unexpected remote upload options: %+v", opts.RemoteUpload)
 	}
 	if opts.RemoteUpload.PrivateKey == "~/.ssh/id_ed25519" {
