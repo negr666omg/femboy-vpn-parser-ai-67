@@ -95,8 +95,10 @@ func (m *liveTerminalMouse) Close() {
 		close(m.done)
 		m.setTargets(nil)
 		_, _ = m.stdout.Write([]byte("\x1b[?1006l\x1b[?1000l"))
-		_ = unix.IoctlSetTermios(int(m.stdin.Fd()), unix.TCSETS, &m.term)
+		// Let the non-canonical reader observe done before restoring canonical
+		// input; otherwise Read could wait forever for a newline.
 		m.wg.Wait()
+		_ = unix.IoctlSetTermios(int(m.stdin.Fd()), unix.TCSETS, &m.term)
 	})
 }
 
@@ -331,7 +333,7 @@ func liveTitleClickRange(line, head string) (int, int, bool) {
 	}
 	startByte := offset + len(prefix)
 	rest := line[startByte:]
-	if separator := strings.LastIndex(rest, " | "); separator >= 0 {
+	if separator := strings.Index(rest, " | "); separator >= 0 {
 		rest = rest[:separator]
 	} else if ping := strings.LastIndex(rest, "ping:"); ping >= 0 {
 		rest = rest[:ping]
