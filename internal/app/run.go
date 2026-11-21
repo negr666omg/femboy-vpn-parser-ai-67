@@ -466,9 +466,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, func(fetchCtx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
 			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL, timeout)
-		}, renderSourceProgress)
+		}, renderSourceProgress, opts.RetryOnConnectionError)
 	} else {
-		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetchHTTPSource, renderSourceProgress)
+		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetchHTTPSource, renderSourceProgress, opts.RetryOnConnectionError)
 	}
 	if sourceProgressRendered {
 		fmt.Fprintln(stdout)
@@ -902,7 +902,21 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	return ctx.Err()
 }
 
-const sourceDownloadTimeout = 30 * time.Second
+const (
+	sourceDownloadTimeout = 30 * time.Second
+	connectionRetryDelay  = 5 * time.Second
+)
+
+func waitForConnectionRetry(ctx context.Context) error {
+	timer := time.NewTimer(connectionRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 func loadSources(ctx context.Context, path string) ([]loadedSource, error) {
 	return loadSourcesWithTimeout(ctx, path, sourceDownloadTimeout)
@@ -930,7 +944,7 @@ func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Durat
 	return loadSourcesWithFetcherProgress(ctx, path, timeout, fetch, nil)
 }
 
-func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress)) ([]loadedSource, error) {
+func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress), retryTransientConnection ...bool) ([]loadedSource, error) {
 	if fetch == nil {
 		fetch = fetchHTTPSource
 	}
@@ -985,15 +999,29 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 			if parseErr != nil || u.Host == "" {
 				source.LoadError = fmt.Errorf("invalid subscription URL")
 			} else {
-				body, fetchErr := fetch(ctx, entry, timeout)
-				if fetchErr != nil {
+				retry := len(retryTransientConnection) > 0 && retryTransientConnection[0]
+				for {
+					body, fetchErr := fetch(ctx, entry, timeout)
+					if fetchErr == nil {
+						source.Body = body
+						break
+					}
 					if ctx.Err() != nil {
 						return sources, ctx.Err()
 					}
+					if retry && isTransientNetworkError(fetchErr) {
+						report(sourceProgress{
+							Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount,
+							Reference: entry, Phase: "connection unavailable; retrying in 5s",
+						})
+						if waitErr := waitForConnectionRetry(ctx); waitErr != nil {
+							return sources, waitErr
+						}
+						continue
+					}
 					source.LoadError = fmt.Errorf("download failed: %w", fetchErr)
 					source.TransientConnectionError = isTransientNetworkError(fetchErr)
-				} else {
-					source.Body = body
+					break
 				}
 			}
 		} else if phase == "loading inline link" {
