@@ -417,7 +417,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
 	var urlPassedLive []sub.Node
 	var urlFilesMu sync.Mutex
-	urlResults, stageErr := runStageWithLiveCallback(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	urlResults, stageErr := runStageWithLiveCallbackMode(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, "checking URL…")
 		passed, latency, testErr := runURLTest(stageCtx, *n, opts)
 		n.URLPassed, n.URLLatencyMS = passed, latency
@@ -451,7 +451,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
 		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
-	}, liveMouse)
+	}, opts.LiveDisplayMode, liveMouse)
 	if stageErr != nil {
 		return stageErr
 	}
@@ -473,7 +473,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 2 begins only after every URL test has completed (global barrier).
 	// urlPassed remains the authoritative in-memory result set.
 	fmt.Fprintf(stdout, "\n[3/4] SPEED TEST (%s): %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", strings.ToUpper(opts.SpeedProvider), len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
-	speedResults, stageErr := runStageWithLiveCallback(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	speedResults, stageErr := runStageWithLiveCallbackMode(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "starting "+strings.ToUpper(opts.SpeedProvider)+" speed test…"))
 		down, up, testErr := runSpeedTestWithProgress(stageCtx, *n, opts, func(progress check.SpeedProgress) {
 			live(*n, speedProgressDetail(*n, progress))
@@ -521,7 +521,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
 		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
-	}, liveMouse)
+	}, opts.LiveDisplayMode, liveMouse)
 	if stageErr != nil {
 		return stageErr
 	}
@@ -548,7 +548,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 3 starts only after every speed test has completed. No service check
 	// is run on a node that failed either speed threshold.
 	fmt.Fprintf(stdout, "\n[4/4] SERVICE CHECK: %d speed-passed nodes, Gemini must be fully available\n", len(speedPassed))
-	serviceResults, stageErr := runStageWithLiveCallback(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	serviceResults, stageErr := runStageWithLiveCallbackMode(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "Gemini: checking…"))
 		status, note, region, ipInfo, testErr := runServiceCheck(stageCtx, *n, opts)
 		n.GeminiStatus, n.GeminiNote, n.GeminiRegion = status, note, region
@@ -582,7 +582,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
 		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
-	}, liveMouse)
+	}, opts.LiveDisplayMode, liveMouse)
 	if stageErr != nil {
 		return stageErr
 	}
@@ -1259,6 +1259,11 @@ func runStageWithCallback(ctx context.Context, label string, nodes []sub.Node, c
 // Concurrent workers may test multiple nodes, but only the most recently
 // started node owns the visible line; older workers cannot overwrite it later.
 func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error, mouseArgs ...*liveTerminalMouse) ([]sub.Node, error) {
+	return runStageWithLiveCallbackMode(ctx, label, nodes, concurrency, stdout, passed, test, onComplete, "immediate", mouseArgs...)
+}
+
+func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error, displayMode string, mouseArgs ...*liveTerminalMouse) ([]sub.Node, error) {
+	deferredDisplay := displayMode == "after_result"
 	var mouse *liveTerminalMouse
 	if len(mouseArgs) > 0 {
 		mouse = mouseArgs[0]
@@ -1369,7 +1374,7 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 
 				progressMu.Lock()
 				statuses[workerID].active = true
-				if optsLiveDisplayModeImmediate(mouseArgs, label) {
+				if !deferredDisplay {
 					statuses[workerID] = workerStatus{node: results[i], detail: "starting…", active: true}
 				}
 				render()
@@ -1377,7 +1382,7 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 
 				emit := func(node sub.Node, detail string) {
 					progressMu.Lock()
-					if !optsLiveDisplayModeDeferred(mouseArgs, label) {
+					if !deferredDisplay {
 						statuses[workerID].node = node
 						statuses[workerID].detail = cleanLiveText(detail)
 						render()
