@@ -22,6 +22,7 @@ type Options struct {
 	Protocols          []string
 	URLConcurrency     int
 	SpeedConcurrency   int
+	SpeedProvider      string
 	ServiceConcurrency int
 	URLTimeout         time.Duration
 	SpeedTimeout       time.Duration
@@ -78,6 +79,7 @@ type fileConfig struct {
 	} `json:"url_test"`
 	SpeedTest struct {
 		Concurrency   int      `json:"concurrency"`
+		Provider      string   `json:"provider"`
 		Timeout       string   `json:"timeout"`
 		MinDownload   *float64 `json:"min_download_mbps"`
 		MinUpload     *float64 `json:"min_upload_mbps"`
@@ -122,7 +124,7 @@ func DefaultOptions() Options {
 	return Options{
 		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true,
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
-		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4,
+		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4, SpeedProvider: "cloudflare",
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
 		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
 		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {download}↓{upload}↑", SpeedDecimals: 1,
@@ -186,6 +188,12 @@ func LoadOptions(path string) (Options, error) {
 			return opts, fmt.Errorf("url_test.timeout must be a positive duration: %q", cfg.URLTest.Timeout)
 		}
 		opts.URLTimeout = d
+	}
+	if cfg.SpeedTest.Provider != "" {
+		opts.SpeedProvider = strings.ToLower(strings.TrimSpace(cfg.SpeedTest.Provider))
+	}
+	if opts.SpeedProvider != "cloudflare" && opts.SpeedProvider != "ookla" {
+		return opts, fmt.Errorf("speed_test.provider must be cloudflare or ookla")
 	}
 	if cfg.SpeedTest.Concurrency > 0 {
 		opts.SpeedConcurrency = cfg.SpeedTest.Concurrency
