@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +14,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"errors"
 
 	"github.com/negr666omg/subwatch/internal/sub"
 )
@@ -1068,6 +1069,32 @@ func TestTransientNetworkErrorClassification(t *testing.T) {
 	}
 	if !isTransientNetworkError(context.DeadlineExceeded) {
 		t.Fatal("network deadline should be treated as transient")
+	}
+}
+
+func TestLoadSourcesMarksTransientRemoteFailures(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sources.txt")
+	if err := os.WriteFile(path, []byte("https://timeout.example/sub\\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := loadSourcesWithFetcher(context.Background(), path, time.Second, func(context.Context, string, time.Duration) ([]byte, error) {
+		return nil, errors.New("dial tcp: i/o timeout")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || !sources[0].TransientConnectionError {
+		t.Fatalf("temporary remote failure was not marked retryable: %#v", sources)
+	}
+	sources, err = loadSourcesWithFetcher(context.Background(), path, time.Second, func(context.Context, string, time.Duration) ([]byte, error) {
+		return nil, errors.New("server returned HTTP 404")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sources[0].TransientConnectionError {
+		t.Fatal("HTTP 404 must not be retried as a transient network failure")
 	}
 }
 
