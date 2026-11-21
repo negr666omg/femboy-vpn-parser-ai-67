@@ -23,7 +23,9 @@ import (
 
 const (
 	coreVersion   = "1.14.4"
-	startupTimeout = 20 * time.Second
+	// Keep local process readiness independent from URL-test timeout without
+	// turning a broken outbound into a 20-second delay for every node.
+	startupTimeout = 8 * time.Second
 )
 
 type Instance struct {
