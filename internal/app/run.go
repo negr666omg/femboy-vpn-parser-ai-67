@@ -863,7 +863,7 @@ func runStageWithCallback(ctx context.Context, label string, nodes []sub.Node, c
 func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error) ([]sub.Node, error) {
 	results := make([]sub.Node, len(nodes))
 	if len(nodes) == 0 {
-		fmt.Fprintf(stdout, "[%s] 0/0 (nothing to test)\\n", label)
+		fmt.Fprintf(stdout, "[%s] 0/0 (nothing to test)\n", label)
 		return results, nil
 	}
 	if concurrency < 1 {
@@ -894,7 +894,7 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 	terminalRowsDrawn := false
 	render := func() {
 		if terminalWidth > 0 {
-				active := 0
+			active := 0
 			for _, status := range statuses {
 				if status.active {
 					active++
@@ -902,11 +902,11 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 			}
 			header := fmt.Sprintf("[%s] %d/%d | active: %d | passed: %d | failed: %d",
 				label, done, len(nodes), active, successes, done-successes)
-			fmt.Fprintf(stdout, "\\x1b[%dA", boolInt(terminalRowsDrawn)*(concurrency+1))
-			fmt.Fprintf(stdout, "\\r\\x1b[2K%s\\n", truncateDisplay(header, terminalWidth-1))
+			if terminalRowsDrawn {\n\t\t\t\tfmt.Fprintf(stdout, "\x1b[%dA", concurrency+1)\n\t\t\t}
+			fmt.Fprintf(stdout, "\r\x1b[2K%s\n", truncateDisplay(header, terminalWidth-1))
 			for i, status := range statuses {
 				line := formatLiveWorkerStatusLine(label, i+1, status.node, status.detail, terminalWidth)
-				fmt.Fprintf(stdout, "\\r\\x1b[2K%s\\n", line)
+				fmt.Fprintf(stdout, "\r\x1b[2K%s\n", line)
 			}
 			terminalRowsDrawn = true
 			return
@@ -922,7 +922,7 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 			}
 		}
 		line := formatLiveStatusLine(label, done, len(nodes), successes, statuses[visible].node, statuses[visible].detail, 0)
-		fmt.Fprintf(stdout, "\\r\\x1b[2K%s", line)
+		fmt.Fprintf(stdout, "\r\x1b[2K%s", line)
 	}
 
 	for worker := 0; worker < concurrency; worker++ {
