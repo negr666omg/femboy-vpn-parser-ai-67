@@ -38,10 +38,14 @@ func NewClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
 	}}, nil
 }
 func CloseClient(c *http.Client) {
-	if c != nil {
-		if t, ok := c.Transport.(*http.Transport); ok {
-			t.CloseIdleConnections()
-		}
+	if c == nil {
+		return
+	}
+	switch t := c.Transport.(type) {
+	case *http.Transport:
+		t.CloseIdleConnections()
+	case *geminiTransport:
+		t.Close()
 	}
 }
 
@@ -289,6 +293,7 @@ func GeminiTest(ctx context.Context, client *http.Client) (status, note, region 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	req.Header.Set("Sec-Ch-Ua", `"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"`)
 	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 	req.Header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
@@ -302,7 +307,7 @@ func GeminiTest(ctx context.Context, client *http.Client) (status, note, region 
 		return "failed", e.Error(), "", e
 	}
 	defer resp.Body.Close()
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1572864))
+	body, readErr := readGeminiBody(resp, 1572864)
 	if readErr != nil {
 		return "failed", "response read error", "", readErr
 	}
