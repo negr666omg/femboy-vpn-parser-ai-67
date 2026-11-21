@@ -1747,8 +1747,8 @@ func formatMbps(value float64, _ int) string {
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
 	var status, note, region string
 	var info check.IPDetails
-	err := withNodeProxy(parent, n, opts, opts.ServiceTimeout, func(ctx context.Context, proxyURL string) error {
-		client, clientErr := check.NewGeminiClient(proxyURL, opts.ServiceTimeout, inst.Dialer)
+	err := withNodeProxy(parent, n, opts, opts.ServiceTimeout, func(ctx context.Context, proxyURL string, dialer *net.Dialer) error {
+		client, clientErr := check.NewGeminiClient(proxyURL, opts.ServiceTimeout, dialer)
 		if clientErr != nil {
 			return clientErr
 		}
@@ -1790,13 +1790,13 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 
 // withNodeProxy exposes the local sing-box HTTP CONNECT endpoint so Gemini can
 // use Throne-compatible TLS/HTTP2 without changing the other test stages.
-func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string) error) error {
-	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
+func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string, *net.Dialer) error) error {
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
 	defer inst.Close()
-	return fn(parent, inst.ProxyURL)
+	return fn(parent, inst.ProxyURL, inst.Dialer)
 }
 
 func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
