@@ -648,6 +648,7 @@ func TestPrintSubscriptionPassSummarySortsDescendingAndKeepsStableTies(t *testin
 }
 
 func TestLiveStageRendersOneReplaceableStatusLine(t *testing.T) {
+	t.Setenv("COLUMNS", "")
 	nodes := []sub.Node{
 		{Name: "First config", Protocol: "vless"},
 		{Name: "Second config", Protocol: "ss"},
