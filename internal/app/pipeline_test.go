@@ -113,6 +113,59 @@ func TestFilterHysteria2AlsoIncludesLegacyHysteria(t *testing.T) {
 	}
 }
 
+
+func TestWriteURLFailureReportIncludesEveryFailureAndReason(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "url-test-failures.txt")
+	nodes := []sub.Node{
+		{
+			Name: "Germany node", Protocol: "vmess",
+				URI: "vmess://uuid@example.test:443?type=ws",
+				URLLatencyMS: 8123, URLError: "start proxy: connection refused",
+		},
+		{
+			Name: "US node", Protocol: "vless",
+				URI: "vless://uuid@example.org:443",
+				URLLatencyMS: 10000, URLError: "Get \"https://example.com\": context deadline exceeded",
+		},
+	}
+	if err := writeURLFailureReport(path, "https://www.gstatic.com/generate_204", nodes); err != nil {
+		t.Fatalf("writeURLFailureReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	report := string(data)
+	for _, want := range []string{
+		"Failed nodes: 2",
+		"Germany node (vmess)",
+		"Latency: 8123 ms",
+		"start proxy: connection refused",
+		"vmess://uuid@example.test:443?type=ws",
+		"US node (vless)",
+		"context deadline exceeded",
+		"vless://uuid@example.org:443",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+func TestWriteURLFailureReportHandlesNoFailures(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "url-test-failures.txt")
+	if err := writeURLFailureReport(path, "https://example.com/204", nil); err != nil {
+		t.Fatalf("writeURLFailureReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(data), "No URL test failures.") {
+		t.Fatalf("unexpected empty report: %s", data)
+	}
+}
+
 func TestDeduplicateAndProtocolFilter(t *testing.T) {
 	nodes := []sub.Node{
 		{Name: "A", Protocol: "vless", Key: "same"},
