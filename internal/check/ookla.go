@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -321,8 +320,13 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 			}
 			rate := float64(total) * 8 / elapsed / 1e6
 			if progress != nil {
-				progress(SpeedProgress{Phase: phase, CompletedBytes: total, DownloadMbps: 0, UploadMbps: 0})
-				_ = rate
+				event := SpeedProgress{Phase: phase, CompletedBytes: total}
+				if phase == "download" {
+					event.DownloadMbps = rate
+				} else {
+					event.UploadMbps = rate
+				}
+				progress(event)
 			}
 			return rate, nil
 		case <-done:
@@ -334,7 +338,17 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 			if total == 0 || elapsed <= 0 {
 				return 0, fmt.Errorf("no data transferred")
 			}
-			return float64(total) * 8 / elapsed / 1e6, nil
+			rate := float64(total) * 8 / elapsed / 1e6
+			if progress != nil {
+				event := SpeedProgress{Phase: phase, CompletedBytes: total}
+				if phase == "download" {
+					event.DownloadMbps = rate
+				} else {
+					event.UploadMbps = rate
+				}
+				progress(event)
+			}
+			return rate, nil
 		case now := <-ticker.C:
 			total := transferred.Load()
 			seconds := now.Sub(lastReport).Seconds()
@@ -356,4 +370,3 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 	}
 }
 
-var _ = strings.TrimSpace
