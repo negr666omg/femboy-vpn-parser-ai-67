@@ -9,12 +9,24 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-const ooklaServerListURL = "https://www.speedtest.net/api/js/servers"
+const (
+	ooklaServerListURL          = "https://www.speedtest.net/api/js/servers"
+	ooklaServerCandidateLimit   = 12
+	ooklaProbeTimeout           = 2 * time.Second
+	ooklaDirectionMaxDuration   = 8 * time.Second
+	ooklaPeakWindow             = 2 * time.Second
+	ooklaProgressInterval       = 500 * time.Millisecond
+	ooklaWorkerCount            = 4
+	ooklaPayloadSize            = 1 << 20
+	ooklaMaxConsecutiveFailures = 3
+	ooklaRetryDelay             = 150 * time.Millisecond
+)
 
 type ooklaServer struct {
 	URL     string `json:"url"`
@@ -32,36 +44,111 @@ type ooklaServerProbe struct {
 type ooklaCountingReader struct {
 	reader io.Reader
 	count  atomic.Int64
+	onRead func(int64)
 }
 
 func (r *ooklaCountingReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
-	r.count.Add(int64(n))
+	if n > 0 {
+		r.count.Add(int64(n))
+		if r.onRead != nil {
+			r.onRead(int64(n))
+		}
+	}
 	return n, err
 }
 
-// OoklaSpeedTestWithProgress discovers Speedtest.net servers automatically, selects
-// the fastest reachable server through the supplied per-node proxy, and measures
-// download and upload throughput against that server.
+type ooklaRateSample struct {
+	at    time.Time
+	bytes int64
+}
+
+type ooklaRateSampler struct {
+	samples []ooklaRateSample
+	peak    float64
+}
+
+func newOoklaRateSampler(start time.Time) *ooklaRateSampler {
+	return &ooklaRateSampler{samples: []ooklaRateSample{{at: start}}}
+}
+
+// observe returns a rolling throughput average over approximately the last
+// two seconds. Keeping this window independent of individual HTTP response
+// boundaries avoids the 0 -> burst -> 0 pattern caused by counting only when
+// a 1 MiB request has completely finished.
+func (s *ooklaRateSampler) observe(now time.Time, totalBytes int64) float64 {
+	s.samples = append(s.samples, ooklaRateSample{at: now, bytes: totalBytes})
+	cutoff := now.Add(-ooklaPeakWindow)
+
+	baseIndex := 0
+	for i := 1; i < len(s.samples); i++ {
+		if s.samples[i].at.After(cutoff) {
+			break
+		}
+		baseIndex = i
+	}
+	base := s.samples[baseIndex]
+	elapsed := now.Sub(base.at).Seconds()
+	rate := 0.0
+	if elapsed > 0 && totalBytes >= base.bytes {
+		rate = float64(totalBytes-base.bytes) * 8 / elapsed / 1e6
+	}
+	// Only consider a near-full rolling window for the final peak. Short
+	// startup bursts are deliberately excluded from the pass/fail result.
+	if now.Sub(base.at) >= ooklaPeakWindow-ooklaProgressInterval && rate > s.peak {
+		s.peak = rate
+	}
+	if baseIndex > 0 {
+		samples := append([]ooklaRateSample(nil), s.samples[baseIndex:]...)
+		s.samples = samples
+	}
+	return rate
+}
+
+func (s *ooklaRateSampler) result(now, start time.Time, totalBytes int64) float64 {
+	s.observe(now, totalBytes)
+	if s.peak > 0 {
+		return s.peak
+	}
+	elapsed := now.Sub(start).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(totalBytes) * 8 / elapsed / 1e6
+}
+
+// OoklaSpeedTestWithProgress discovers Speedtest.net servers automatically,
+// selects the lowest-latency reachable server through the supplied per-node
+// proxy, and measures download/upload throughput against that server. The
+// result is the maximum sustained two-second rate, not the whole-test average.
 func OoklaSpeedTestWithProgress(ctx context.Context, client *http.Client, duration time.Duration, progress func(SpeedProgress)) (float64, float64, error) {
 	return ooklaSpeedTestWithEndpoint(ctx, client, ooklaServerListURL, duration, progress)
 }
 
-// ooklaSpeedTestWithEndpoint is split out so server discovery can be tested against
-// a local Speedtest.net-compatible endpoint without contacting the public service.
+// ooklaSpeedTestWithEndpoint is split out so server discovery can be tested
+// against a local Speedtest.net-compatible endpoint without contacting the
+// public service.
 func ooklaSpeedTestWithEndpoint(ctx context.Context, client *http.Client, endpoint string, duration time.Duration, progress func(SpeedProgress)) (float64, float64, error) {
 	if client == nil {
 		return 0, 0, fmt.Errorf("Ookla speed test requires an HTTP client")
 	}
 	if duration <= 0 {
-		duration = 10 * time.Second
+		duration = ooklaDirectionMaxDuration
+	}
+	if duration > ooklaDirectionMaxDuration {
+		duration = ooklaDirectionMaxDuration
 	}
 
-	servers, err := fetchOoklaServers(ctx, client, endpoint)
+	listCtx, cancelList := context.WithTimeout(ctx, 5*time.Second)
+	servers, err := fetchOoklaServers(listCtx, client, endpoint)
+	cancelList()
 	if err != nil {
 		return 0, 0, err
 	}
-	server, err := selectOoklaServer(ctx, client, servers)
+
+	probeCtx, cancelProbe := context.WithTimeout(ctx, ooklaProbeTimeout+250*time.Millisecond)
+	server, err := selectOoklaServer(probeCtx, client, servers)
+	cancelProbe()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -94,7 +181,7 @@ func fetchOoklaServers(ctx context.Context, client *http.Client, endpoint string
 	query := u.Query()
 	query.Set("engine", "js")
 	query.Set("https_functional", "true")
-	query.Set("limit", "30")
+	query.Set("limit", strconv.Itoa(ooklaServerCandidateLimit))
 	u.RawQuery = query.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -102,6 +189,7 @@ func fetchOoklaServers(ctx context.Context, client *http.Client, endpoint string
 		return nil, fmt.Errorf("create Ookla server-list request: %w", err)
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SubWatch/0.4; speedtest)")
+	req.Header.Set("Cache-Control", "no-cache")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch Ookla server list: %w", err)
@@ -118,8 +206,8 @@ func fetchOoklaServers(ctx context.Context, client *http.Client, endpoint string
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("Ookla returned an empty server list")
 	}
-	if len(servers) > 30 {
-		servers = servers[:30]
+	if len(servers) > ooklaServerCandidateLimit {
+		servers = servers[:ooklaServerCandidateLimit]
 	}
 	return servers, nil
 }
@@ -130,7 +218,6 @@ func selectOoklaServer(ctx context.Context, client *http.Client, servers []ookla
 		err   error
 	}
 	results := make(chan result, len(servers))
-	limit := make(chan struct{}, 8)
 	var workers sync.WaitGroup
 
 	for _, server := range servers {
@@ -141,22 +228,17 @@ func selectOoklaServer(ctx context.Context, client *http.Client, servers []ookla
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			select {
-			case limit <- struct{}{}:
-			case <-ctx.Done():
-				results <- result{err: ctx.Err()}
-				return
-			}
-			defer func() { <-limit }()
-
-			probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			probeCtx, cancel := context.WithTimeout(ctx, ooklaProbeTimeout)
 			defer cancel()
+
 			target, _ := ooklaLatencyURL(server.URL)
+			target = addOoklaCacheBuster(target, time.Now().UnixNano())
 			req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, target, nil)
 			if err != nil {
 				results <- result{err: err}
 				return
 			}
+			req.Header.Set("Cache-Control", "no-cache")
 			start := time.Now()
 			resp, err := client.Do(req)
 			if err != nil {
@@ -226,8 +308,19 @@ func ooklaDownloadURL(uploadURL string) (string, error) {
 	return u.String(), nil
 }
 
+func addOoklaCacheBuster(raw string, value int64) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	query := u.Query()
+	query.Set("x", strconv.FormatInt(value, 10))
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
 func resolveOoklaUploadURL(ctx context.Context, client *http.Client, target string) string {
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, target, nil)
 	if err != nil {
@@ -245,83 +338,137 @@ func resolveOoklaUploadURL(ctx context.Context, client *http.Client, target stri
 }
 
 func runOoklaDirection(parent context.Context, client *http.Client, method, target string, duration time.Duration, progress func(SpeedProgress), phase string) (float64, error) {
+	if duration <= 0 {
+		duration = ooklaDirectionMaxDuration
+	}
+	if duration > ooklaDirectionMaxDuration {
+		duration = ooklaDirectionMaxDuration
+	}
+
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	const workers = 4
-	payload := bytes.Repeat([]byte{0x5a}, 1<<20)
+	payload := bytes.Repeat([]byte{0x5a}, ooklaPayloadSize)
 	var transferred atomic.Int64
+	var requestID atomic.Int64
 	var firstErr error
 	var errOnce sync.Once
 	var wg sync.WaitGroup
 
-	for i := 0; i < workers; i++ {
+	recordFailure := func(err error, consecutive *int) bool {
+		if ctx.Err() != nil {
+			return true
+		}
+		errOnce.Do(func() { firstErr = err })
+		*consecutive++
+		if *consecutive >= ooklaMaxConsecutiveFailures {
+			return true
+		}
+		timer := time.NewTimer(ooklaRetryDelay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return true
+		case <-timer.C:
+			return false
+		}
+	}
+
+	start := time.Now()
+	for i := 0; i < ooklaWorkerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			consecutiveFailures := 0
 			for ctx.Err() == nil {
+				requestURL := target
+				if method == http.MethodGet {
+					requestURL = addOoklaCacheBuster(target, requestID.Add(1))
+				}
 				var body io.Reader
 				var uploadBody *ooklaCountingReader
 				if method == http.MethodPost {
-					uploadBody = &ooklaCountingReader{reader: bytes.NewReader(payload)}
+					uploadBody = &ooklaCountingReader{
+						reader: bytes.NewReader(payload),
+						onRead: func(n int64) { transferred.Add(n) },
+					}
 					body = uploadBody
 				}
-				req, err := http.NewRequestWithContext(ctx, method, target, body)
+				req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 				if err != nil {
-					errOnce.Do(func() { firstErr = err })
-					return
+					if recordFailure(err, &consecutiveFailures) {
+						return
+					}
+					continue
 				}
 				req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SubWatch/0.4; speedtest)")
+				req.Header.Set("Cache-Control", "no-cache")
+				req.Header.Set("Pragma", "no-cache")
 				if method == http.MethodPost {
 					req.Header.Set("Content-Type", "application/octet-stream")
 					req.ContentLength = int64(len(payload))
 				}
+
 				resp, err := client.Do(req)
 				if err != nil {
-					if ctx.Err() == nil {
-						errOnce.Do(func() { firstErr = err })
+					if recordFailure(err, &consecutiveFailures) {
+						return
 					}
-					return
+					continue
 				}
-				if method == http.MethodGet {
-					n, copyErr := io.Copy(io.Discard, resp.Body)
+
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					statusErr := fmt.Errorf("HTTP %d", resp.StatusCode)
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 					_ = resp.Body.Close()
-					if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-						errOnce.Do(func() { firstErr = fmt.Errorf("HTTP %d", resp.StatusCode) })
+					if recordFailure(statusErr, &consecutiveFailures) {
 						return
 					}
-					if n > 0 {
-						transferred.Add(n)
+					continue
+				}
+
+				if method == http.MethodGet {
+					reader := &ooklaCountingReader{
+						reader: resp.Body,
+						onRead: func(n int64) { transferred.Add(n) },
 					}
+					_, copyErr := io.Copy(io.Discard, reader)
+					_ = resp.Body.Close()
 					if copyErr != nil {
-						if ctx.Err() == nil {
-							errOnce.Do(func() { firstErr = copyErr })
+						if ctx.Err() != nil {
+							return
 						}
-						return
+						if recordFailure(copyErr, &consecutiveFailures) {
+							return
+						}
+						continue
 					}
-					if n == 0 {
-						errOnce.Do(func() { firstErr = fmt.Errorf("empty download response") })
-						return
+					if reader.count.Load() == 0 {
+						if recordFailure(fmt.Errorf("empty download response"), &consecutiveFailures) {
+							return
+						}
+						continue
 					}
 				} else {
-					_, copyErr := io.Copy(io.Discard, resp.Body)
+					_, copyErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 					_ = resp.Body.Close()
-					if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-						errOnce.Do(func() { firstErr = fmt.Errorf("HTTP %d", resp.StatusCode) })
-						return
-					}
 					if copyErr != nil {
-						if ctx.Err() == nil {
-							errOnce.Do(func() { firstErr = copyErr })
+						if ctx.Err() != nil {
+							return
 						}
-						return
+						if recordFailure(copyErr, &consecutiveFailures) {
+							return
+						}
+						continue
 					}
-					if sent := uploadBody.count.Load(); sent != int64(len(payload)) {
-						errOnce.Do(func() { firstErr = fmt.Errorf("upload server confirmed an incomplete body: %d/%d bytes", sent, len(payload)) })
-						return
+					if uploadBody.count.Load() != int64(len(payload)) {
+						if recordFailure(fmt.Errorf("upload body was incomplete: %d/%d bytes", uploadBody.count.Load(), len(payload)), &consecutiveFailures) {
+							return
+						}
+						continue
 					}
-					transferred.Add(int64(len(payload)))
 				}
+				consecutiveFailures = 0
 			}
 		}()
 	}
@@ -332,13 +479,38 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 		close(done)
 	}()
 
-	start := time.Now()
-	ticker := time.NewTicker(500 * time.Millisecond)
+	sampler := newOoklaRateSampler(start)
+	ticker := time.NewTicker(ooklaProgressInterval)
 	defer ticker.Stop()
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
-	lastBytes := int64(0)
-	lastReport := start
+
+	finish := func() (float64, error) {
+		cancel()
+		<-done
+		total := transferred.Load()
+		if total == 0 {
+			if firstErr != nil {
+				return 0, firstErr
+			}
+			return 0, fmt.Errorf("no data transferred")
+		}
+		now := time.Now()
+		rate := sampler.result(now, start, total)
+		if rate <= 0 {
+			return 0, fmt.Errorf("could not calculate Ookla throughput")
+		}
+		if progress != nil {
+			event := SpeedProgress{Phase: phase, CompletedBytes: total}
+			if phase == "download" {
+				event.DownloadMbps = rate
+			} else {
+				event.UploadMbps = rate
+			}
+			progress(event)
+		}
+		return rate, nil
+	}
 
 	for {
 		select {
@@ -347,9 +519,8 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 			<-done
 			return 0, parent.Err()
 		case <-timer.C:
-			cancel()
-			<-done
-			elapsed := time.Since(start).Seconds()
+			return finish()
+		case <-done:
 			total := transferred.Load()
 			if total == 0 {
 				if firstErr != nil {
@@ -357,44 +528,10 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 				}
 				return 0, fmt.Errorf("no data transferred")
 			}
-			rate := float64(total) * 8 / elapsed / 1e6
-			if progress != nil {
-				event := SpeedProgress{Phase: phase, CompletedBytes: total}
-				if phase == "download" {
-					event.DownloadMbps = rate
-				} else {
-					event.UploadMbps = rate
-				}
-				progress(event)
-			}
-			return rate, nil
-		case <-done:
-			elapsed := time.Since(start).Seconds()
-			total := transferred.Load()
-			if firstErr != nil {
-				return 0, firstErr
-			}
-			if total == 0 || elapsed <= 0 {
-				return 0, fmt.Errorf("no data transferred")
-			}
-			rate := float64(total) * 8 / elapsed / 1e6
-			if progress != nil {
-				event := SpeedProgress{Phase: phase, CompletedBytes: total}
-				if phase == "download" {
-					event.DownloadMbps = rate
-				} else {
-					event.UploadMbps = rate
-				}
-				progress(event)
-			}
-			return rate, nil
+			return finish()
 		case now := <-ticker.C:
 			total := transferred.Load()
-			seconds := now.Sub(lastReport).Seconds()
-			rate := 0.0
-			if seconds > 0 {
-				rate = float64(total-lastBytes) * 8 / seconds / 1e6
-			}
+			rate := sampler.observe(now, total)
 			if progress != nil {
 				event := SpeedProgress{Phase: phase, CompletedBytes: total}
 				if phase == "download" {
@@ -404,8 +541,6 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 				}
 				progress(event)
 			}
-			lastBytes, lastReport = total, now
 		}
 	}
 }
-

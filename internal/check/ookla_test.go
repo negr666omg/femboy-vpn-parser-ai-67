@@ -99,3 +99,84 @@ func TestOoklaSpeedTestRejectsEmptyServerList(t *testing.T) {
 		t.Fatalf("expected empty server-list error, got %v", err)
 	}
 }
+
+func TestOoklaRateSamplerReturnsSustainedRollingPeak(t *testing.T) {
+	start := time.Unix(100, 0)
+	sampler := newOoklaRateSampler(start)
+
+	// The first burst is deliberately ignored for the final peak because it
+	// does not cover a full measurement window.
+	sampler.observe(start.Add(500*time.Millisecond), 2<<20)
+	sampler.observe(start.Add(2500*time.Millisecond), 5<<20)
+	sampler.observe(start.Add(4500*time.Millisecond), 7<<20)
+
+	got := sampler.result(start.Add(4500*time.Millisecond), start, 7<<20)
+	want := float64(3<<20) * 8 / 2 / 1e6
+	if got < want-0.01 || got > want+0.01 {
+		t.Fatalf("rolling peak = %.2f Mbps, want %.2f Mbps", got, want)
+	}
+}
+
+func TestOoklaCountingReaderReportsBytesDuringReads(t *testing.T) {
+	var liveBytes atomic.Int64
+	reader := &ooklaCountingReader{
+		reader: strings.NewReader("a somewhat longer test payload"),
+		onRead: func(n int64) { liveBytes.Add(n) },
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(data)) != reader.count.Load() || reader.count.Load() != liveBytes.Load() {
+		t.Fatalf("reader count=%d live count=%d data=%d", reader.count.Load(), liveBytes.Load(), len(data))
+	}
+}
+
+func TestOoklaSpeedTestSurvivesIndividualRequestFailures(t *testing.T) {
+	var failedDownload atomic.Bool
+	var failedUpload atomic.Bool
+	payload := strings.Repeat("x", 256*1024)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/js/servers":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `[{"url":%q,"name":"Test City","country":"Testland","sponsor":"Test ISP","id":"1"}]`, "http://"+r.Host+"/speedtest/upload.php")
+		case "/speedtest/latency.txt":
+			w.WriteHeader(http.StatusOK)
+		case "/speedtest/random1000x1000.jpg":
+			if failedDownload.CompareAndSwap(false, true) {
+				http.Error(w, "temporary request failure", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = io.WriteString(w, payload)
+		case "/speedtest/upload.php":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if failedUpload.CompareAndSwap(false, true) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				http.Error(w, "temporary request failure", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	down, up, err := ooklaSpeedTestWithEndpoint(context.Background(), server.Client(), server.URL+"/api/js/servers", 250*time.Millisecond, nil)
+	if err != nil {
+		t.Fatalf("transient per-request failures should not fail the whole test: %v", err)
+	}
+	if down <= 0 || up <= 0 {
+		t.Fatalf("expected positive throughput after retries, got download=%.2f upload=%.2f", down, up)
+	}
+	if !failedDownload.Load() || !failedUpload.Load() {
+		t.Fatal("test did not exercise both transient request failures")
+	}
+}
+
