@@ -471,7 +471,7 @@ func fetchHTTPSource(ctx context.Context, sourceURL string, timeout time.Duratio
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("User-Agent", "SubWatch/0.3.8")
+	req.Header.Set("User-Agent", "SubWatch/0.3.9")
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
