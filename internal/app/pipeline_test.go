@@ -492,7 +492,7 @@ func TestRunStageCallbackRunsForEachCompletedNode(t *testing.T) {
 
 func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
+	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "notes-old.txt", "custom-export.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -507,6 +507,11 @@ func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "config.json")); err != nil {
 		t.Fatalf("config was removed: %v", err)
+	}
+	for _, name := range []string{"notes-old.txt", "custom-export.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("unrelated user file %s was removed: %v", name, err)
+		}
 	}
 }
 
@@ -1119,3 +1124,29 @@ func TestURLLiveDetailReportsRenameFailureSeparately(t *testing.T) {
 		t.Fatalf("unexpected URL live detail: %q", got)
 	}
 }
+
+func TestInitNeverOverwritesExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	existing := map[string]string{
+		"sources.txt": "https://custom.example/subscription\n",
+		"config.json": "{\n  \"custom\": true\n}\n",
+	}
+	for name, content := range existing {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Init(dir); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range existing {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Fatalf("Init overwrote %s: got %q, want %q", name, got, want)
+		}
+	}
+}
+
