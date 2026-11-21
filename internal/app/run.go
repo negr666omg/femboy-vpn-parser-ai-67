@@ -365,6 +365,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		} else if !passed {
 			n.URLError = "URL test returned non-success status"
 		}
+		if passed && opts.RenameNodes {
+			n.RenameError = renameNodeAfterURL(stageCtx, n, opts)
+		}
 		live(*n, urlLiveDetail(*n))
 	}, func(completed sub.Node) error {
 		if !completed.URLPassed {
@@ -406,17 +409,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		n.SpeedPassed = true
 		if opts.RenameNodes {
-			geoErr := withNodeClient(stageCtx, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
-				country := lookupCountry(ctx, client, opts.GeoIPURL)
-				flag := countryFlag(country)
-				if flag == "" { return fmt.Errorf("GeoIP country lookup failed") }
-				n.Country = country
-				name := strings.NewReplacer("{flag}", flag, "{download}", formatMbps(down, opts.SpeedDecimals), "{upload}", formatMbps(up, opts.SpeedDecimals)).Replace(opts.NameFormat)
-				if name == opts.NameFormat { return fmt.Errorf("service_check.name_format has no supported placeholders") }
-				sub.RenameNode(n, name)
-				return nil
-			})
-			if geoErr != nil { n.SpeedError = "rename: " + geoErr.Error() }
+			n.RenameError = renameNodeAfterSpeed(stageCtx, n, opts, down, up)
 		}
 		live(*n, speedLiveDetail(*n, "PASS"))
 	}, nil)
@@ -1049,7 +1042,11 @@ func cleanLiveText(value string) string {
 
 func urlLiveDetail(n sub.Node) string {
 	if n.URLPassed {
-		return "URL: PASS"
+		detail := "URL: PASS"
+		if n.RenameError != "" {
+			detail += " | rename: " + shortLiveError(n.RenameError)
+		}
+		return detail
 	}
 	if n.URLError != "" {
 		return "URL: FAIL (" + shortLiveError(n.URLError) + ")"
@@ -1367,6 +1364,73 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 	return down, up, err
 }
 
+
+func renameNodeAfterURL(parent context.Context, n *sub.Node, opts Options) string {
+	if n == nil {
+		return "cannot rename a nil node"
+	}
+	if err := ensureNodeCountry(parent, n, opts); err != nil {
+		return err.Error()
+	}
+	flag := countryFlag(n.Country)
+	if flag == "" {
+		return "GeoIP country lookup returned an invalid country code"
+	}
+	// Speed placeholders are intentionally omitted until both measurements exist.
+	sub.RenameNode(n, flag)
+	return ""
+}
+
+func renameNodeAfterSpeed(parent context.Context, n *sub.Node, opts Options, download, upload float64) string {
+	if n == nil {
+		return "cannot rename a nil node"
+	}
+	if err := ensureNodeCountry(parent, n, opts); err != nil {
+		return err.Error()
+	}
+	flag := countryFlag(n.Country)
+	if flag == "" {
+		return "GeoIP country lookup returned an invalid country code"
+	}
+	template := opts.NameFormat
+	if template == "" {
+		template = DefaultOptions().NameFormat
+	}
+	name := strings.NewReplacer(
+		"{flag}", flag,
+		"{download}", formatMbps(download, opts.SpeedDecimals),
+		"{upload}", formatMbps(upload, opts.SpeedDecimals),
+	).Replace(template)
+	if strings.TrimSpace(name) == "" {
+		return "service_check.name_format produced an empty node name"
+	}
+	sub.RenameNode(n, name)
+	return ""
+}
+
+func ensureNodeCountry(parent context.Context, n *sub.Node, opts Options) error {
+	if n == nil {
+		return fmt.Errorf("node is nil")
+	}
+	if countryFlag(strings.ToUpper(strings.TrimSpace(n.Country))) != "" {
+		n.Country = strings.ToUpper(strings.TrimSpace(n.Country))
+		return nil
+	}
+	return withNodeClient(parent, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
+		country := lookupCountry(ctx, client, opts.GeoIPURL)
+		if countryFlag(country) == "" {
+			// Retry with independent public GeoIP providers if the configured endpoint
+			// is unavailable or does not return a usable ISO country code.
+			country = check.LookupIP(ctx, client).Country
+		}
+		country = strings.ToUpper(strings.TrimSpace(country))
+		if countryFlag(country) == "" {
+			return fmt.Errorf("GeoIP country lookup failed")
+		}
+		n.Country = country
+		return nil
+	})
+}
 
 func lookupCountry(ctx context.Context, client *http.Client, endpoint string) string {
 	if endpoint == "" { endpoint = "https://ipwho.is/" }
