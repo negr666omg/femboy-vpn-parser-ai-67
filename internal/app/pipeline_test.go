@@ -759,3 +759,30 @@ func TestFormatMbpsRoundsToWholeNumbers(t *testing.T) {
 		if got := formatMbps(tc.value, tc.decimals); got != tc.want { t.Errorf("formatMbps(%v,%d)=%q want %q", tc.value, tc.decimals, got, tc.want) }
 	}
 }
+
+
+func TestInvalidConfigOutputIsWrittenAndCleanedBetweenRuns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invalid.txt")
+	lines := []string{
+		"vless://missing-port",
+		"unsupported://example.test:443",
+	}
+
+	if err := writeInvalidLines(path, lines); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), strings.Join(lines, "\n")+"\n"; got != want {
+		t.Fatalf("invalid.txt=%q, want %q", got, want)
+	}
+	if err := cleanOutputArtifacts(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid.txt should be removed before the next run, stat err=%v", err)
+	}
+}
