@@ -64,6 +64,28 @@ func TestParseShadowsocksURI(t *testing.T) {
 	}
 }
 
+func TestParseDocumentReportsLineProgress(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < 300; i++ {
+		body.WriteString("vless://11111111-1111-4111-8111-111111111111@example.test:443\n")
+	}
+	var updates int
+	lastProcessed, lastTotal, lastNodes, lastInvalid := 0, 0, 0, 0
+	nodes, invalid, err := ParseDocumentWithProgress([]byte(body.String()), func(processed, total, parsed, bad int) {
+		updates++
+		lastProcessed, lastTotal, lastNodes, lastInvalid = processed, total, parsed, bad
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 300 || invalid != 0 {
+		t.Fatalf("nodes=%d invalid=%d, want 300 and 0", len(nodes), invalid)
+	}
+	if updates < 3 || lastProcessed != 300 || lastTotal != 300 || lastNodes != 300 || lastInvalid != 0 {
+		t.Fatalf("unexpected final progress: updates=%d processed=%d total=%d nodes=%d invalid=%d", updates, lastProcessed, lastTotal, lastNodes, lastInvalid)
+	}
+}
+
 func TestParseBase64Subscription(t *testing.T) {
 	encoded := "dmxlc3M6Ly8xMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTFAZXhhbXBsZS5jb206NDQzP3NlY3VyaXR5PXRscyNhbHBoYQp0cm9qYW46Ly9zZWNyZXRAZXhhbXBsZS5jb206NDQzI2JldGE="
 	nodes, invalid, err := ParseDocument([]byte(encoded))
