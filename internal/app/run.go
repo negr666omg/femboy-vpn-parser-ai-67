@@ -1829,22 +1829,22 @@ func cleanOutputArtifacts(dir string) error {
 		}
 	}
 
-	// Remove only known SubWatch split-output prefixes. A broad "*-*.txt"
-	// pattern also deletes unrelated files such as "notes-old.txt" that
-	// users may intentionally keep in the output directory.
-	prefixes := []string{
-		"all-", "unique-", "selected-",
-		"url-test-finished-", "url-test-failed-",
-		"speed-test-finished-", "speedtest-finished-", "speedtest-failed-",
-		"tested-", "service-check-results-", "final-", "gemini-",
+	// Split output names are deterministic: <stage>-<protocol>.<extension>.
+	// Remove only those exact generated names instead of globbing user files.
+	protocols := []string{
+		"vless", "vmess", "trojan", "ss", "shadowsocks",
+		"hysteria", "hysteria2", "tuic", "socks", "socks5", "http", "unknown",
 	}
-	for _, prefix := range prefixes {
-		for _, extension := range []string{".txt", ".json"} {
-			paths, err := filepath.Glob(filepath.Join(dir, prefix+"*"+extension))
-			if err != nil {
-				return err
-			}
-			for _, path := range paths {
+	splitBases := []string{
+		"all", "unique", "selected",
+		"url-test-finished", "url-test-failed",
+		"speed-test-finished", "speedtest-finished", "speedtest-failed",
+		"tested", "service-check-results", "final", "gemini",
+	}
+	for _, base := range splitBases {
+		for _, protocol := range protocols {
+			for _, extension := range []string{".txt", ".json"} {
+				path := filepath.Join(dir, base+"-"+protocol+extension)
 				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return err
 				}
