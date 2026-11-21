@@ -43,6 +43,7 @@ type Options struct {
 	MinUpload          float64
 	LookupIP           bool
 	RemoteUpload       RemoteUploadOptions
+	LiveDisplayMode    string
 }
 
 type RemoteUploadOptions struct {
@@ -109,6 +110,9 @@ type fileConfig struct {
 		RemoteDirectory string `json:"remote_directory"`
 		Interface       string `json:"interface"`
 	} `json:"remote_upload"`
+	LiveDisplay struct {
+		Mode string `json:"mode"`
+	} `json:"live_display"`
 	Output struct {
 		Directory        string `json:"directory"`
 		GeminiFile       *bool  `json:"gemini_file"`
@@ -117,7 +121,7 @@ type fileConfig struct {
 
 func DefaultOptions() Options {
 	return Options{
-		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true,
+		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true, LiveDisplayMode: "after_result",
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4, SpeedProvider: "cloudflare",
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
@@ -302,6 +306,13 @@ func LoadOptions(path string) (Options, error) {
 		}
 		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory, Interface: strings.TrimSpace(r.Interface)}
 	}
+	if cfg.LiveDisplay.Mode != "" {
+		mode := strings.ToLower(strings.TrimSpace(cfg.LiveDisplay.Mode))
+		if mode != "after_result" && mode != "immediate" {
+			return opts, fmt.Errorf("live_display.mode must be after_result or immediate")
+		}
+		opts.LiveDisplayMode = mode
+	}
 	if cfg.Output.Directory != "" {
 		opts.OutDir = cfg.Output.Directory
 	}
@@ -399,6 +410,9 @@ func ExampleConfig() string {
     "rename_nodes": true,
     "geoip_url": "https://ipwho.is/",
     "name_format": "{flag} {country} {download}↓{upload}↑"
+  },
+  "live_display": {
+    "mode": "after_result"
   },
   "output": {
     "directory": "out",
