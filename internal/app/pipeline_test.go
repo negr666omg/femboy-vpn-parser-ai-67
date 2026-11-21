@@ -834,7 +834,7 @@ func TestLiveStageRendersOneStatusRowPerConcurrentWorker(t *testing.T) {
 	if !strings.Contains(output, "[URL TEST worker 1]") || !strings.Contains(output, "[URL TEST worker 2]") {
 		t.Fatalf("worker row labels are missing: %q", output)
 	}
-	if !strings.Contains(output, "\\x1b[3A") {
+	if !strings.Contains(output, "\x1b[3A") {
 		t.Fatalf("expected a three-row live block (summary + two workers) to be redrawn: %q", output)
 	}
 }
