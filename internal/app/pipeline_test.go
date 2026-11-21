@@ -308,7 +308,7 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 		nodes []sub.Node
 	}{
 		{"url-test-finished", urlNodes},
-		{"speedtest-finished", speedNodes},
+		{"speed-test-finished", speedNodes},
 		{"gemini", geminiNodes},
 	} {
 		if err := writeStageFiles(dir, item.base, item.nodes, true); err != nil {
@@ -318,7 +318,7 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 	for name, want := range map[string]string{
 		"url-test-finished-vless.txt": "vless://url-one\n",
 		"url-test-finished-ss.txt": "ss://url-two\n",
-		"speedtest-finished-vless.txt": "vless://speed-one\n",
+		"speed-test-finished-vless.txt": "vless://speed-one\n",
 		"gemini-ss.txt": "ss://gemini-one\n",
 	} {
 		got, err := os.ReadFile(filepath.Join(dir, name))
@@ -345,6 +345,12 @@ func TestGeminiFileToggleSeparatesGeminiSubscriptions(t *testing.T) {
 	urlNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "old", URI: "vless://node#old", URLPassed: true}}
 	speedNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true}}
 	geminiNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true, GeminiStatus: "available"}}
+	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStageFiles(dir, "speed-test-finished", speedNodes, true); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeGeminiResults(dir, geminiNodes, parsed, urlNodes, speedNodes, true); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +376,7 @@ func TestGeminiDisabledMarksNodesInEveryApplicableFile(t *testing.T) {
 	if err := writeGeminiResults(dir, geminiNodes, parsed, urlNodes, speedNodes, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "url-test-finished.txt", "url-test-finished-vless.txt", "speedtest-finished.txt", "speedtest-finished-vless.txt"} {
+	for _, name := range []string{"all.txt", "url-test-finished.txt", "url-test-finished-vless.txt", "speed-test-finished.txt", "speed-test-finished-vless.txt"} {
 		data := string(mustRead(t, filepath.Join(dir, name)))
 		if !strings.Contains(data, "Gemini") {
 			t.Fatalf("%s did not receive Gemini marker: %q", name, data)
