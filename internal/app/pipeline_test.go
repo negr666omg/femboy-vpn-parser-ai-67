@@ -408,6 +408,72 @@ func TestLoadSourcesWithFetcherUsesNamespaceFetcherOnlyForRemoteURLs(t *testing.
 	}
 }
 
+func TestLoadSourcesReportsPerSourceProgress(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "local.txt")
+	if err := os.WriteFile(localPath, []byte("ss://local-source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sourcesPath := filepath.Join(dir, "sources.txt")
+	contents := "https://user:secret@subscription.example/private?token=hidden\\n" + localPath + "\\nvless://id@example.test:443\\n"
+	if err := os.WriteFile(sourcesPath, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var progress []sourceProgress
+	fetcher := func(_ context.Context, _ string, _ time.Duration) ([]byte, error) {
+		return []byte("vless://remote@example.test:443"), nil
+	}
+	sources, err := loadSourcesWithFetcherProgress(context.Background(), sourcesPath, time.Second, fetcher, func(p sourceProgress) {
+		progress = append(progress, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 3 {
+		t.Fatalf("expected three sources, got %d", len(sources))
+	}
+	wantPhases := []string{"reading source list", "downloading", "downloaded", "reading local file", "loaded", "loading inline link", "loaded", "all sources loaded"}
+	phaseIndex := 0
+	for _, event := range progress {
+		if phaseIndex < len(wantPhases) && event.Phase == wantPhases[phaseIndex] {
+			phaseIndex++
+		}
+	}
+	if phaseIndex != len(wantPhases) {
+		t.Fatalf("missing or out-of-order progress events, got %#v", progress)
+	}
+	last := progress[len(progress)-1]
+	if last.Index != 3 || last.Total != 3 || last.Loaded != 3 || last.Skipped != 0 {
+		t.Fatalf("unexpected final progress: %+v", last)
+	}
+}
+
+func TestSourceProgressLineRedactsCredentialsAndFitsTerminal(t *testing.T) {
+	progress := sourceProgress{
+		Index: 2, Total: 12, Loaded: 1, Skipped: 0,
+		Reference: "https://user:secret@subscription.example/private?token=hidden",
+		Phase: "downloading",
+	}
+	if got := sourceProgressTitle(progress.Reference); got != "https://subscription.example" {
+		t.Fatalf("source title leaked URL details or is unclear: %q", got)
+	}
+	line := formatSourceProgressLine(progress, 80)
+	if strings.Contains(line, "secret") || strings.Contains(line, "token") || strings.Contains(line, "/private") {
+		t.Fatalf("source progress leaked credentials or URL tokens: %q", line)
+	}
+	if got := displayWidth(line); got > 79 {
+		t.Fatalf("source status width=%d, exceeds terminal limit: %q", got, line)
+	}
+	progress.Phase = "parsing"
+	progress.LinesProcessed, progress.TotalLines, progress.Nodes, progress.Invalid = 256, 1024, 74, 3
+	line = formatSourceProgressLine(progress, 120)
+	for _, want := range []string{"parsing lines 256/1024", "nodes: 74", "invalid: 3"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("missing parser progress %q in %q", want, line)
+		}
+	}
+}
+
 func TestLoadSourcesDoesNotSwallowWholeRunCancellation(t *testing.T) {
 	dir := t.TempDir()
 	sourcesPath := filepath.Join(dir, "sources.txt")
