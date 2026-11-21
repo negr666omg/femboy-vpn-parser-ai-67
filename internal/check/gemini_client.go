@@ -19,7 +19,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
-	"github.com/metacubex/utls"
+	utls "github.com/metacubex/utls"
 	"golang.org/x/net/http2"
 )
 
