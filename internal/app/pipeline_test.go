@@ -415,7 +415,7 @@ func TestLoadSourcesReportsPerSourceProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	sourcesPath := filepath.Join(dir, "sources.txt")
-	contents := "https://user:secret@subscription.example/private?token=hidden\\n" + localPath + "\\nvless://id@example.test:443\\n"
+	contents := "https://user:secret@subscription.example/private?token=hidden\n" + localPath + "\nvless://id@example.test:443\n"
 	if err := os.WriteFile(sourcesPath, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
