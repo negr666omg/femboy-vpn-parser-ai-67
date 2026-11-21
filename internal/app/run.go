@@ -306,7 +306,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "Deduplicated: %d unique | %d duplicates | enabled protocols: %s | nodes to test: %d\n", len(unique), duplicates, strings.Join(opts.Protocols, ","), len(selected))
 	fmt.Fprintf(stdout, "Proxy interface: %s | URL concurrency: %d | speed concurrency: %d | service concurrency: %d\n", opts.Interface, opts.URLConcurrency, opts.SpeedConcurrency, opts.ServiceConcurrency)
-	fmt.Fprintf(stdout, "Speed payload: %.2f/%.2f MiB | minimum DL/UL: %.2f/%.2f Mbps | download URL: %s | upload URL: %s\n", float64(opts.DownloadBytes)/(1<<20), float64(opts.UploadBytes)/(1<<20), opts.MinDownload, opts.MinUpload, opts.SpeedDownloadURL, opts.SpeedUploadURL)
+	if opts.SpeedProvider == "ookla" {
+		fmt.Fprintf(stdout, "Speed provider: Ookla Speedtest.net | automatic server selection | minimum DL/UL: %.2f/%.2f Mbps\n", opts.MinDownload, opts.MinUpload)
+	} else {
+		fmt.Fprintf(stdout, "Speed provider: Cloudflare | payload: %.2f/%.2f MiB | minimum DL/UL: %.2f/%.2f Mbps | download URL: %s | upload URL: %s\n", float64(opts.DownloadBytes)/(1<<20), float64(opts.UploadBytes)/(1<<20), opts.MinDownload, opts.MinUpload, opts.SpeedDownloadURL, opts.SpeedUploadURL)
+	}
 
 	fmt.Fprintln(stdout, "[prepare] Checking sing-box; first run may download the verified core...")
 	corePath, err := core.FindOrDownloadProgress(opts.CorePath, stdout)
@@ -358,7 +362,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// urlPassed remains the authoritative in-memory result set.
 	fmt.Fprintf(stdout, "\n[3/4] SPEED TEST: %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
 	speedResults, _ := runStageWithLiveCallback(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
-		live(*n, speedLiveDetail(*n, "starting speed test…"))
+		live(*n, speedLiveDetail(*n, "starting "+strings.ToUpper(opts.SpeedProvider)+" speed test…"))
 		down, up, testErr := runSpeedTestWithProgress(stageCtx, *n, opts, func(progress check.SpeedProgress) {
 			live(*n, speedProgressDetail(*n, progress))
 		})
@@ -1311,7 +1315,11 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 		testCtx, cancel := context.WithTimeout(ctx, opts.SpeedTimeout)
 		defer cancel()
 		var testErr error
-		down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress, opts.FirstByteTimeout, opts.MaxSpeedDuration, opts.SpeedSampleInterval)
+		if opts.SpeedProvider == "ookla" {
+			down, up, testErr = check.OoklaSpeedTestWithProgress(testCtx, client, opts.MaxSpeedDuration, progress)
+		} else {
+			down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress, opts.FirstByteTimeout, opts.MaxSpeedDuration, opts.SpeedSampleInterval)
+		}
 		return testErr
 	})
 	return down, up, err
