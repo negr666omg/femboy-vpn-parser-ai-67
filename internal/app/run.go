@@ -902,7 +902,9 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 			}
 			header := fmt.Sprintf("[%s] %d/%d | active: %d | passed: %d | failed: %d",
 				label, done, len(nodes), active, successes, done-successes)
-			if terminalRowsDrawn {\n\t\t\t\tfmt.Fprintf(stdout, "\x1b[%dA", concurrency+1)\n\t\t\t}
+			if terminalRowsDrawn {
+				fmt.Fprintf(stdout, "\x1b[%dA", concurrency+1)
+			}
 			fmt.Fprintf(stdout, "\r\x1b[2K%s\n", truncateDisplay(header, terminalWidth-1))
 			for i, status := range statuses {
 				line := formatLiveWorkerStatusLine(label, i+1, status.node, status.detail, terminalWidth)
@@ -979,7 +981,6 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 	}
 	return results, callbackErr
 }
-
 func formatLiveWorkerStatusLine(label string, worker int, node sub.Node, detail string, terminalWidth int) string {
 	head := fmt.Sprintf("[%s worker %d]", label, worker)
 	return formatLiveStatusParts(head, liveNodeTitle(node), detail, livePingText(node), terminalWidth)
