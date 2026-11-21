@@ -232,6 +232,10 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	var sourceDiagnostics []string
 	for i, source := range sources {
 		if source.LoadError != nil {
+			renderSourceProgress(sourceProgress{
+				Index: i + 1, Total: len(sources), Loaded: loadedCount, Skipped: skippedCount,
+				Reference: source.Reference, Phase: "skipping failed source",
+			})
 			sourceErrors++
 			lineNo := source.Line
 			if lineNo < 1 {
@@ -533,7 +537,7 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 		}
 		if source.LoadError != nil {
 			skippedCount++
-			report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: "failed: " + source.LoadError.Error()})
+			report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: "failed"})
 		} else {
 			loadedCount++
 			finishedPhase := "loaded"
@@ -639,7 +643,7 @@ func sourceProgressTitle(reference string) string {
 	if parsed, err := url.Parse(reference); err == nil && parsed.Scheme != "" {
 		scheme := strings.ToLower(parsed.Scheme)
 		switch scheme {
-		case "http", "https", "vless", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "socks", "socks5", "http":
+		case "http", "https", "vless", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "socks", "socks5":
 			if parsed.Host != "" {
 				return scheme + "://" + parsed.Host
 			}
@@ -667,7 +671,11 @@ func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string
 	}
 	line := strings.TrimSpace(head + " | " + identity + " | " + detail)
 	if terminalWidth > 0 {
-		return truncateDisplay(line, maxInt(1, terminalWidth-1))
+		limit := terminalWidth - 1
+		if limit < 1 {
+			limit = 1
+		}
+		return truncateDisplay(line, limit)
 	}
 	return line
 }
