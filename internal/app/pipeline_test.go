@@ -840,3 +840,21 @@ func TestLiveStageRendersOneStatusRowPerConcurrentWorker(t *testing.T) {
 		t.Fatalf("expected a three-row live block (summary + two workers) to be redrawn: %q", output)
 	}
 }
+
+
+func TestDefaultSpeedTestProviderIsCloudflare(t *testing.T) {
+	if got := DefaultOptions().SpeedProvider; got != "cloudflare" {
+		t.Fatalf("default speed provider = %q, want cloudflare", got)
+	}
+}
+
+func TestInvalidSpeedTestProviderIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"speed_test":{"provider":"not-a-provider"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "speed_test.provider") {
+		t.Fatalf("expected speed_test.provider validation error, got %v", err)
+	}
+}
