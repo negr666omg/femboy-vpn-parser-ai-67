@@ -464,6 +464,16 @@ func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Durat
 }
 
 func fetchHTTPSource(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+	return fetchHTTPSourceWithProxy(ctx, sourceURL, timeout, true)
+}
+
+// fetchHTTPSourceDirect deliberately ignores HTTP_PROXY/HTTPS_PROXY inherited
+// from the host: an isolated source download must use the namespace's own route.
+func fetchHTTPSourceDirect(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+	return fetchHTTPSourceWithProxy(ctx, sourceURL, timeout, false)
+}
+
+func fetchHTTPSourceWithProxy(ctx context.Context, sourceURL string, timeout time.Duration, useEnvironmentProxy bool) ([]byte, error) {
 	if timeout <= 0 {
 		timeout = sourceDownloadTimeout
 	}
@@ -473,6 +483,9 @@ func fetchHTTPSource(ctx context.Context, sourceURL string, timeout time.Duratio
 	}
 	req.Header.Set("User-Agent", "SubWatch/0.3.9")
 	client := &http.Client{Timeout: timeout}
+	if !useEnvironmentProxy {
+		client.Transport = &http.Transport{Proxy: nil}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -526,7 +539,7 @@ func FetchSourceCommand() error {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return fmt.Errorf("invalid HTTP(S) source URL")
 	}
-	body, err := fetchHTTPSource(context.Background(), sourceURL, sourceDownloadTimeout)
+	body, err := fetchHTTPSourceDirect(context.Background(), sourceURL, sourceDownloadTimeout)
 	if err != nil {
 		return err
 	}
