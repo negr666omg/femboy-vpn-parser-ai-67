@@ -360,6 +360,7 @@ func ExampleConfig() string {
     "timeout": "12s"
   },
   "speed_test": {
+    "provider": "cloudflare",
     "concurrency": 2,
     "timeout": "85s",
     "first_byte_timeout": "10s",
