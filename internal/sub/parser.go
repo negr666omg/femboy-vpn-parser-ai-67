@@ -20,6 +20,7 @@ type Node struct {
 	URLPassed    bool            `json:"url_passed"`
 	URLLatencyMS int64           `json:"url_latency_ms,omitempty"`
 	URLError     string          `json:"url_error,omitempty"`
+	RenameError  string          `json:"rename_error,omitempty"`
 	SpeedPassed  bool            `json:"speed_passed"`
 	DownloadMbps float64         `json:"download_mbps"`
 	UploadMbps   float64         `json:"upload_mbps"`
