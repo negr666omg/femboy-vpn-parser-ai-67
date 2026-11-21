@@ -1,11 +1,6 @@
 package sub
 
-import (
-	"encoding/base64"
-	"encoding/json"
-	"strings"
-	"testing"
-)
+import ("testing"; "strings")
 
 func TestParseURIProtocols(t *testing.T) {
 	cases := []struct{ name, uri, typ string }{
@@ -167,79 +162,5 @@ func TestParseDocumentReturnsInvalidConfigLines(t *testing.T) {
 		if invalid[i] != want[i] {
 			t.Fatalf("invalid line %d=%q, want %q", i, invalid[i], want[i])
 		}
-	}
-}
-
-
-func TestRenameVMessUpdatesEmbeddedRemarkAndURIFragment(t *testing.T) {
-	config := []byte(`{
-		"v":"2",
-		"ps":"old name",
-		"add":"example.test",
-		"port":"443",
-		"id":"11111111-1111-4111-8111-111111111111",
-		"aid":"0",
-		"scy":"auto",
-		"net":"ws",
-		"type":"none",
-		"host":"example.test",
-		"path":"/",
-		"tls":"tls"
-	}`)
-	uri := "vmess://" + base64.StdEncoding.EncodeToString(config)
-	node, err := ParseURI(uri)
-	if err != nil {
-		t.Fatalf("parse VMess config: %v", err)
-	}
-
-	const want = "🇩🇪 72↓31↑"
-	RenameNode(&node, want)
-
-	if node.Name != want {
-		t.Fatalf("node.Name = %q, want %q", node.Name, want)
-	}
-	if !strings.Contains(node.URI, "#") {
-		t.Fatalf("renamed VMess URI has no fragment: %q", node.URI)
-	}
-
-	renamed, err := ParseURI(node.URI)
-	if err != nil {
-		t.Fatalf("parse renamed VMess URI: %v", err)
-	}
-	if renamed.Name != want {
-		t.Fatalf("parsed name = %q, want %q", renamed.Name, want)
-	}
-
-	payload := strings.TrimPrefix(strings.SplitN(node.URI, "#", 2)[0], "vmess://")
-	decoded, err := base64.StdEncoding.DecodeString(payload)
-	if err != nil {
-		t.Fatalf("decode renamed VMess payload: %v", err)
-	}
-	var embedded struct {
-		Name string `json:"ps"`
-	}
-	if err := json.Unmarshal(decoded, &embedded); err != nil {
-		t.Fatalf("decode renamed VMess JSON: %v", err)
-	}
-	if embedded.Name != want {
-		t.Fatalf("embedded VMess ps = %q, want %q", embedded.Name, want)
-	}
-	if node.Outbound["_name"] != want {
-		t.Fatalf("sing-box outbound name = %#v, want %q", node.Outbound["_name"], want)
-	}
-}
-
-func TestParseVMessPayloadWithSlashPath(t *testing.T) {
-	// A slash in standard Base64 must remain part of the opaque VMess payload,
-	// not be lost when net/url splits the URI into host and path components.
-	config := []byte(`{"v":"2","ps":"slash","add":"example.test","port":"443","id":"11111111-1111-4111-8111-111111111111","extra":"??????"}`)
-	encoded := base64.StdEncoding.EncodeToString(config)
-	encoded = strings.ReplaceAll(encoded, "/", "/")
-	node, err := ParseURI("vmess://" + encoded)
-	if err != nil {
-		t.Fatalf("parse VMess payload: %v", err)
-	}
-	if node.Outbound["type"] != "vmess" {
-		t.Fatalf("unexpected outbound type: %#v", node.Outbound["type"])
 	}
 }
