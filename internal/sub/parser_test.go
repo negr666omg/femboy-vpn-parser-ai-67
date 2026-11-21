@@ -196,6 +196,28 @@ func TestParseShadowsocksURI(t *testing.T) {
 	}
 }
 
+func TestParseShadowsocksBase64IPv6Endpoint(t *testing.T) {
+	payload := "aes-128-gcm:secret@[2001:db8::1]:8388"
+	uri := "ss://" + base64.StdEncoding.EncodeToString([]byte(payload))
+
+	node, err := ParseURI(uri)
+	if err != nil {
+		t.Fatalf("ParseURI(%q): %v", uri, err)
+	}
+	if got := node.Outbound["server"]; got != "2001:db8::1" {
+		t.Fatalf("server = %#v, want IPv6 address", got)
+	}
+	if got := node.Outbound["server_port"]; got != 8388 {
+		t.Fatalf("server_port = %#v, want 8388", got)
+	}
+	if got := node.Outbound["method"]; got != "aes-128-gcm" {
+		t.Fatalf("method = %#v", got)
+	}
+	if got := node.Outbound["password"]; got != "secret" {
+		t.Fatalf("password = %#v", got)
+	}
+}
+
 func TestParseDocumentReportsLineProgress(t *testing.T) {
 	var body strings.Builder
 	for i := 0; i < 300; i++ {
