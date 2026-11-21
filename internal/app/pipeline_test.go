@@ -1179,11 +1179,20 @@ func TestSourceRetryWaitStopsOnCancellation(t *testing.T) {
 
 func TestAllSourcesFailedWithTransientConnections(t *testing.T) {
 	sources := []loadedSource{
-		{Reference: "https://one.example/sub", LoadError: errors.New("timeout"), TransientConnectionError: true},
-		{Reference: "http://two.example/sub", LoadError: errors.New("connection refused"), TransientConnectionError: true},
+		{Reference: "https://one.example/sub", LoadError: errors.New("download failed after 3 retries: timeout"), TransientConnectionError: true},
+		{Reference: "http://two.example/sub", LoadError: errors.New("download failed after 3 retries: connection refused"), TransientConnectionError: true},
 	}
 	if !allSourcesFailedWithTransientConnections(sources) {
-		t.Fatal("all remote sources with transient errors should be retryable")
+		t.Fatal("all remote sources with exhausted transient retries should remain retryable")
+	}
+	if err := allSourcesUnavailableRetryError(true, 0, sources); !IsRetryableConnectionError(err) {
+		t.Fatalf("all sources unavailable must trigger another whole-source retry, got %v", err)
+	}
+	if err := allSourcesUnavailableRetryError(false, 0, sources); err != nil {
+		t.Fatalf("disabled retry option must not retry all sources: %v", err)
+	}
+	if err := allSourcesUnavailableRetryError(true, 1, sources); err != nil {
+		t.Fatalf("one or more parsed nodes must allow the pipeline to proceed: %v", err)
 	}
 	sources[0].Reference = "./local.txt"
 	if allSourcesFailedWithTransientConnections(sources) {
