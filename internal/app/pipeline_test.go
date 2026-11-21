@@ -101,6 +101,18 @@ func TestIsolatedSourceDownloadsRequireExplicitInterface(t *testing.T) {
 	}
 }
 
+
+func TestFilterHysteria2AlsoIncludesLegacyHysteria(t *testing.T) {
+	nodes := []sub.Node{
+		{Name: "legacy", Protocol: "hysteria"},
+		{Name: "modern", Protocol: "hysteria2"},
+	}
+	selected := filterProtocols(nodes, []string{"hysteria2"})
+	if len(selected) != 2 {
+		t.Fatalf("selected %d nodes, want both Hysteria generations", len(selected))
+	}
+}
+
 func TestDeduplicateAndProtocolFilter(t *testing.T) {
 	nodes := []sub.Node{
 		{Name: "A", Protocol: "vless", Key: "same"},
