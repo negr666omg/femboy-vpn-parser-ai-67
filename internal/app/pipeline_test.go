@@ -649,12 +649,17 @@ func TestSourceProgressLineRedactsCredentialsAndFitsTerminal(t *testing.T) {
 		Reference: "https://user:secret@subscription.example/private?token=hidden",
 		Phase: "downloading",
 	}
-	if got := sourceProgressTitle(progress.Reference); got != "subscription.example" {
-		t.Fatalf("source title leaked URL details or is unclear: %q", got)
+	if got := sourceProgressTitle(progress.Reference); got != "https://subscription.example/private?token=REDACTED" {
+		t.Fatalf("source title should show the full safe URL: %q", got)
 	}
-	line := formatSourceProgressLine(progress, 80)
-	if strings.Contains(line, "secret") || strings.Contains(line, "token") || strings.Contains(line, "/private") {
-		t.Fatalf("source progress leaked credentials or URL tokens: %q", line)
+	line := formatSourceProgressLine(progress, 120)
+	if strings.Contains(line, "secret") || strings.Contains(line, "hidden") || !strings.Contains(line, "/private?token=REDACTED") {
+		t.Fatalf("source progress should show the URL path while redacting credentials: %q", line)
+	}
+	head := "[PARSE 2/12 ok:1 skip:0]"
+	startCol, endCol, ok := liveTitleClickRange(line, head)
+	if !ok || startCol < 1 || endCol <= startCol {
+		t.Fatalf("full source title is not exposed as a clickable range: %d-%d, line=%q", startCol, endCol, line)
 	}
 	if got := displayWidth(line); got > 79 {
 		t.Fatalf("source status width=%d, exceeds terminal limit: %q", got, line)
@@ -802,6 +807,53 @@ func TestLiveStageRendersOneReplaceableStatusLine(t *testing.T) {
 	}
 }
 
+
+func TestLiveStageKeepsLastPingWhileNextConfigRuns(t *testing.T) {
+	t.Setenv("COLUMNS", "")
+	nodes := []sub.Node{
+		{Name: "First config", Protocol: "vless"},
+		{Name: "Second config", Protocol: "ss"},
+	}
+	var out bytes.Buffer
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	result := make(chan error, 1)
+
+	go func() {
+		_, err := runStageWithLiveCallback(
+			context.Background(), "URL TEST", nodes, 1, &out,
+			func(n *sub.Node) bool { return n.URLPassed },
+			func(_ context.Context, n *sub.Node, live func(sub.Node, string)) {
+				if n.Name == "First config" {
+					n.URLPassed = true
+					n.URLLatencyMS = 42
+					live(*n, urlLiveDetail(*n))
+					return
+				}
+				live(*n, "checking URL…")
+				close(secondStarted)
+				<-releaseSecond
+				n.URLPassed = true
+				n.URLLatencyMS = 87
+				live(*n, urlLiveDetail(*n))
+			},
+			nil,
+		)
+		result <- err
+	}()
+
+	<-secondStarted
+	output := out.String()
+	if !strings.Contains(output, "Second config (ss)") || !strings.Contains(output, "last ping: 42 ms") {
+		t.Fatalf("last completed ping was not kept visible while the next config runs: %q", output)
+	}
+	close(releaseSecond)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+
 func TestLiveStatusFitsTerminalAndKeepsPingAtRightEdge(t *testing.T) {
 	node := sub.Node{
 		Name:         "🇩🇪 AetrisVPN — long config name for responsive layout",
@@ -810,7 +862,7 @@ func TestLiveStatusFitsTerminalAndKeepsPingAtRightEdge(t *testing.T) {
 		URLLatencyMS: 124,
 	}
 	for _, width := range []int{40, 80, 120, 160} {
-		line := formatLiveStatusLine("URL TEST", 222, 640, 8, node, "checking URL and collecting a long diagnostic status", width)
+		line := formatLiveStatusLine("URL TEST", 222, 640, 8, "124 ms", node, "checking URL and collecting a long diagnostic status", width)
 		if !strings.HasSuffix(line, "ping: 124 ms") {
 			t.Fatalf("ping is not the final field for width %d: %q", width, line)
 		}
