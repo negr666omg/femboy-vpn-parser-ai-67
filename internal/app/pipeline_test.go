@@ -48,7 +48,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
 		t.Fatalf("protocol aliases not normalized: %#v", opts.Protocols)
 	}
-	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText || opts.GeminiFile {
+	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.GeminiFile {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
 	if opts.SpeedProvider != "ookla" { t.Fatalf("speed provider = %q, want ookla", opts.SpeedProvider) }
@@ -863,11 +863,11 @@ func TestMergeResultsKeepsUpdatedURIAfterRename(t *testing.T) {
 }
 
 func TestFormatMbpsRoundsToWholeNumbers(t *testing.T) {
-	cases := []struct{ value float64; decimals int; want string }{
-		{70, 0, "70"}, {70.4, 2, "70"}, {70.5, 1, "71"}, {0.4, 2, "0"}, {0.5, 1, "1"}, {0.55, 2, "1"},
+	cases := []struct{ value float64; want string }{
+		{70, "70"}, {70.4, "70"}, {70.5, "71"}, {0.4, "0"}, {0.5, "1"}, {0.55, "1"},
 	}
 	for _, tc := range cases {
-		if got := formatMbps(tc.value, tc.decimals); got != tc.want { t.Errorf("formatMbps(%v,%d)=%q want %q", tc.value, tc.decimals, got, tc.want) }
+		if got := formatMbps(tc.value); got != tc.want { t.Errorf("formatMbps(%v)=%q want %q", tc.value, got, tc.want) }
 	}
 }
 
