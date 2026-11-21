@@ -362,8 +362,12 @@ func TestGeminiFileToggleSeparatesGeminiSubscriptions(t *testing.T) {
 			t.Fatalf("expected separate Gemini file %s: %v", name, err)
 		}
 	}
-	if !strings.Contains(geminiNodes[0].URI, "#fast") {
-		t.Fatal("separate Gemini mode unexpectedly renamed node")
+	markedGemini, err := sub.ParseURI(geminiNodes[0].URI)
+	if err != nil {
+		t.Fatalf("parse marked Gemini URI: %v", err)
+	}
+	if !strings.HasSuffix(markedGemini.Name, geminiNameSuffix) {
+		t.Fatalf("dedicated Gemini list is missing its marker: %q", markedGemini.Name)
 	}
 	if strings.Contains(string(mustRead(t, filepath.Join(dir, "url-test-finished.txt"))), "Gemini") {
 		t.Fatal("separate Gemini mode modified earlier stage files")
@@ -990,7 +994,7 @@ func TestMeasuredNodeNamesRefreshAllAndURLLists(t *testing.T) {
 	dir := t.TempDir()
 	parsed := []sub.Node{{Key: "same", Protocol: "vless", Name: "source label", URI: "vless://node#source"}}
 	urlNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇩🇪 Germany", URI: "vless://node#country", URLPassed: true}}
-	measured := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇩🇪 Germany 72↓32↑", URI: "vless://node#measured", URLPassed: true, DownloadMbps: 72, UploadMbps: 32}}
+	measured := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇩🇪 Germany 72↓32↑", URI: "vless://node#🇩🇪 Germany 72↓32↑", URLPassed: true, DownloadMbps: 72, UploadMbps: 32}}
 
 	applyNodeUpdatesByIdentity(parsed, measured)
 	applyNodeUpdatesByIdentity(urlNodes, measured)
