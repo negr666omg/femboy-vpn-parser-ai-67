@@ -14,6 +14,7 @@ func TestParseURIProtocols(t *testing.T) {
 		{"socks", "socks5://user:pass@example.com:1080#three", "socks"},
 		{"http", "http://user:pass@example.com:8080#four", "http"},
 		{"hysteria2", "hysteria2://secret@example.com:443?sni=example.com#five", "hysteria2"},
+		{"hysteria", "hysteria://example.com:443?auth=secret&upmbps=10&downmbps=20&security=tls#legacy", "hysteria"},
 		{"tuic", "tuic://11111111-1111-4111-8111-111111111111:secret@example.com:443?sni=example.com#six", "tuic"},
 	}
 	for _, tc := range cases {
@@ -40,6 +41,31 @@ func TestParseVMess(t *testing.T) {
 		t.Fatalf("unexpected type: %v", n.Outbound["type"])
 	}
 }
+
+func TestParseLegacyHysteriaURI(t *testing.T) {
+	uri := "hysteria://198.200.57.142:22335?auth=github.com%2FAlvin9999-newpac%2Ffanqiang&upmbps=11&downmbps=55&security=tls&allowInsecure=true&alpn=h3#legacy"
+	node, err := ParseURI(uri)
+	if err != nil {
+		t.Fatalf("ParseURI: %v", err)
+	}
+	if node.Protocol != "hysteria" || node.Outbound["type"] != "hysteria" {
+		t.Fatalf("protocol=%q outbound=%#v", node.Protocol, node.Outbound)
+	}
+	if node.Outbound["auth_str"] != "github.com/Alvin9999-newpac/fanqiang" {
+		t.Fatalf("auth_str=%#v", node.Outbound["auth_str"])
+	}
+	if node.Outbound["up_mbps"] != 11 || node.Outbound["down_mbps"] != 55 {
+		t.Fatalf("bandwidth fields=%#v", node.Outbound)
+	}
+	tls := node.Outbound["tls"].(map[string]any)
+	if tls["enabled"] != true || tls["insecure"] != true || tls["server_name"] != "198.200.57.142" {
+		t.Fatalf("TLS options=%#v", tls)
+	}
+	if got := tls["alpn"].([]string); len(got) != 1 || got[0] != "h3" {
+		t.Fatalf("ALPN=%#v", tls["alpn"])
+	}
+}
+
 func TestDedupKeyIgnoresDisplayName(t *testing.T) {
 	a, e := ParseURI("vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls#A")
 	if e != nil {
@@ -245,6 +271,40 @@ func TestRenameVMessUpdatesEmbeddedRemarkAndURIFragment(t *testing.T) {
 	}
 	if node.Outbound["_name"] != want {
 		t.Fatalf("sing-box outbound name = %#v, want %q", node.Outbound["_name"], want)
+	}
+}
+
+
+func TestParseVMessTCPHTTPHeaderFromThroneExtra(t *testing.T) {
+	config := []byte(`{
+		"v":"2",
+		"ps":"legacy tcp http",
+		"add":"192.204.58.87",
+		"port":"52080",
+		"id":"700dc5c3-9b7b-4ac8-8ee5-010ca3d03789",
+		"aid":"0",
+		"scy":"auto",
+		"net":"tcp",
+		"path":"/3x",
+		"type":"http",
+		"host":"mmsc.vnet.mobi",
+		"throneExtra":"type=tcp&headerType=http&host=mmsc.vnet.mobi&path=/3x"
+	}`)
+	uri := "vmess://" + base64.StdEncoding.EncodeToString(config)
+	node, err := ParseURI(uri)
+	if err != nil {
+		t.Fatalf("ParseURI: %v", err)
+	}
+	transport, ok := node.Outbound["transport"].(map[string]any)
+	if !ok || transport["type"] != "http" {
+		t.Fatalf("expected HTTP transport for VMess TCP header, got %#v", node.Outbound["transport"])
+	}
+	if transport["path"] != "/3x" {
+		t.Fatalf("transport path=%#v", transport["path"])
+	}
+	hosts, ok := transport["host"].([]string)
+	if !ok || len(hosts) != 1 || hosts[0] != "mmsc.vnet.mobi" {
+		t.Fatalf("transport host=%#v", transport["host"])
 	}
 }
 
