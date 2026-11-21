@@ -677,7 +677,7 @@ func TestPrintSubscriptionQualitySummaryRanksByExclusiveResultsAndRedactsURLSecr
 		}
 	}
 	for _, want := range []string{
-		"3 unique source entries -> 3 globally unique",
+		"5 unique source entries -> 4 globally unique",
 		"configs: 3 enabled unique | 2 only here | 1 shared",
 		"URL:    only here 2/2 (100.0%) | shared 1/1 (100.0%)",
 	} {
