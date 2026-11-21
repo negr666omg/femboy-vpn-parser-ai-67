@@ -280,8 +280,8 @@ func validateTestURL(raw string) error {
 	return nil
 }
 
-var geminiTrue = regexp.MustCompile(`45631641(?:\\?":|,null,)true`)
-var geminiFalse = regexp.MustCompile(`45631641(?:\\?":|,null,)false`)
+var geminiTrue = regexp.MustCompile(`(?:^|[^0-9])45631641(?:\\?":|,null,)true`)
+var geminiFalse = regexp.MustCompile(`(?:^|[^0-9])45631641(?:\\?":|,null,)false`)
 var geminiRegion = regexp.MustCompile(`,2,1,200,"([A-Z]{3})"`)
 
 func GeminiTest(ctx context.Context, client *http.Client) (status, note, region string, err error) {
