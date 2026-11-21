@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -24,12 +25,15 @@ type Settings struct {
 	MinUpload     float64
 }
 
-func NewClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
+func NewClient(proxyURL string, timeout time.Duration, dialers ...*net.Dialer) (*http.Client, error) {
 	p, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, err
 	}
 	tr := &http.Transport{Proxy: http.ProxyURL(p), MaxIdleConns: 4, MaxIdleConnsPerHost: 2, IdleConnTimeout: 30 * time.Second, DisableCompression: true}
+	if len(dialers) > 0 && dialers[0] != nil {
+		tr.DialContext = dialers[0].DialContext
+	}
 	return &http.Client{Transport: tr, Timeout: timeout, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return http.ErrUseLastResponse

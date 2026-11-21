@@ -26,7 +26,7 @@ import (
 // NewGeminiClient creates the browser-facing transport used by Throne's
 // service checker, without changing the regular URL/speed-test transport.
 // The HTTP CONNECT tunnel is provided by this node's sing-box mixed inbound.
-func NewGeminiClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
+func NewGeminiClient(proxyURL string, timeout time.Duration, dialers ...*net.Dialer) (*http.Client, error) {
 	proxy, err := url.Parse(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse Gemini proxy URL: %w", err)
@@ -41,8 +41,13 @@ func NewGeminiClient(proxyURL string, timeout time.Duration) (*http.Client, erro
 	if err != nil {
 		return nil, fmt.Errorf("create Gemini cookie jar: %w", err)
 	}
+	dialer := &net.Dialer{}
+	if len(dialers) > 0 && dialers[0] != nil {
+		dialer = dialers[0]
+	}
 	transport := &geminiTransport{
 		proxy:   proxy,
+		dialer:  dialer,
 		h2:      &http2.Transport{DisableCompression: true},
 		h2Conns: make(map[string]*http2.ClientConn),
 	}
@@ -61,6 +66,7 @@ func NewGeminiClient(proxyURL string, timeout time.Duration) (*http.Client, erro
 
 type geminiTransport struct {
 	proxy   *url.URL
+	dialer  *net.Dialer
 	h2      *http2.Transport
 	mu      sync.Mutex
 	h2Conns map[string]*http2.ClientConn
@@ -144,7 +150,11 @@ func (t *geminiTransport) dialTLS(ctx context.Context, host, address string) (*u
 		}
 		proxyAddress = net.JoinHostPort(t.proxy.Hostname(), proxyPort)
 	}
-	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxyAddress)
+	dialer := t.dialer
+	if dialer == nil {
+		dialer = &net.Dialer{}
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", proxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("connect to node's HTTP proxy: %w", err)
 	}

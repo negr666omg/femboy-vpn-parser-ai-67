@@ -221,6 +221,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		sourceNamespace = ns
 		opts.NetworkNamespace = ns.Name
+		opts.NetworkNamespaceInterface = ns.HostInterface()
 		defer sourceNamespace.Close()
 		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
 	}
@@ -364,7 +365,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.Interface != "auto" && opts.NetworkNamespace == "" {
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
 		if nsErr != nil { return fmt.Errorf("prepare isolated network: %w", nsErr) }
-		if ns != nil { defer ns.Close(); opts.NetworkNamespace = ns.Name }
+		if ns != nil {
+			defer ns.Close()
+			opts.NetworkNamespace = ns.Name
+			opts.NetworkNamespaceInterface = ns.HostInterface()
+		}
 	}
 
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
@@ -1742,8 +1747,8 @@ func formatMbps(value float64, _ int) string {
 func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, string, string, check.IPDetails, error) {
 	var status, note, region string
 	var info check.IPDetails
-	err := withNodeProxy(parent, n, opts, opts.ServiceTimeout, func(ctx context.Context, proxyURL string) error {
-		client, clientErr := check.NewGeminiClient(proxyURL, opts.ServiceTimeout)
+	err := withNodeProxy(parent, n, opts, opts.ServiceTimeout, func(ctx context.Context, proxyURL string, dialer *net.Dialer) error {
+		client, clientErr := check.NewGeminiClient(proxyURL, opts.ServiceTimeout, dialer)
 		if clientErr != nil {
 			return clientErr
 		}
@@ -1770,12 +1775,12 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 	// Proxy startup has its own readiness deadline in core.Start. The configured
 	// stage timeout applies only to the actual HTTP test, not to local process
 	// startup; otherwise slow startup silently shortens the network timeout.
-	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
 	defer inst.Close()
-	client, err := check.NewClient(inst.ProxyURL, timeout)
+	client, err := check.NewClient(inst.ProxyURL, timeout, inst.Dialer)
 	if err != nil {
 		return err
 	}
@@ -1785,13 +1790,13 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 
 // withNodeProxy exposes the local sing-box HTTP CONNECT endpoint so Gemini can
 // use Throne-compatible TLS/HTTP2 without changing the other test stages.
-func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string) error) error {
-	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
+func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string, *net.Dialer) error) error {
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
 	defer inst.Close()
-	return fn(parent, inst.ProxyURL)
+	return fn(parent, inst.ProxyURL, inst.Dialer)
 }
 
 func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {

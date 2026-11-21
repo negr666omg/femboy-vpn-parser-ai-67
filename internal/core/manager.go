@@ -30,6 +30,7 @@ const (
 
 type Instance struct {
 	ProxyURL string
+	Dialer   *net.Dialer
 	cmd      *exec.Cmd
 	done     chan error
 	tmpDir   string
@@ -196,6 +197,10 @@ func (l *cappedLog) String() string {
 }
 
 func Start(ctx context.Context, binary string, outbound map[string]any, iface string, namespace ...string) (*Instance, error) {
+	return startWithRetries(ctx, binary, outbound, iface, namespace, 0)
+}
+
+func startWithRetries(ctx context.Context, binary string, outbound map[string]any, iface string, namespace []string, portRetry int) (*Instance, error) {
 	proxyBin, err := FindOrDownload(binary)
 	if err != nil {
 		return nil, err
@@ -207,8 +212,20 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	listenAddr := "127.0.0.1"
-	namespaceName := ""
-	if len(namespace) > 0 { namespaceName = namespace[0]; if namespaceName != "" { listenAddr = "10.254.0.2" } }
+	namespaceName, proxyInterface := "", ""
+	if len(namespace) > 0 {
+		namespaceName = namespace[0]
+		if namespaceName != "" {
+			listenAddr = "10.254.0.2"
+		}
+	}
+	if len(namespace) > 1 {
+		proxyInterface = namespace[1]
+	}
+	var proxyDialer *net.Dialer
+	if namespaceName != "" {
+		proxyDialer = namespaceProxyDialer(proxyInterface)
+	}
 	out := make(map[string]any, len(outbound)+1)
 	for k, v := range outbound {
 		if k != "_name" {
@@ -254,25 +271,38 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
-	inst := &Instance{ProxyURL: fmt.Sprintf("http://%s:%d", listenAddr, port), cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir}
+	proxyAddress := fmt.Sprintf("%s:%d", listenAddr, port)
+	inst := &Instance{ProxyURL: "http://" + proxyAddress, Dialer: proxyDialer, cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir}
 	go func() { inst.done <- cmd.Wait() }()
 	deadline := time.NewTimer(startupTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+	var lastDialErr error
 	for {
-		conn, e := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", listenAddr, port), 200*time.Millisecond)
+		var conn net.Conn
+		var e error
+		if proxyDialer != nil {
+			conn, e = proxyDialer.DialContext(ctx, "tcp", proxyAddress)
+		} else {
+			conn, e = net.DialTimeout("tcp", proxyAddress, 200*time.Millisecond)
+		}
 		if e == nil {
 			conn.Close()
 			return inst, nil
 		}
+		lastDialErr = e
 		select {
 		case e := <-inst.done:
 			os.RemoveAll(tmpDir)
 			if e == nil {
 				e = errors.New("sing-box exited before proxy became ready")
 			}
-			if detail := stderr.String(); detail != "" {
+			detail := stderr.String()
+			if strings.Contains(detail, "address already in use") && portRetry < 3 {
+				return startWithRetries(ctx, binary, outbound, iface, namespace, portRetry+1)
+			}
+			if detail != "" {
 				return nil, fmt.Errorf("%w: %s", e, detail)
 			}
 			return nil, e
@@ -285,6 +315,9 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 		case <-deadline.C:
 			inst.Close()
 			reason := fmt.Sprintf("sing-box mixed inbound did not start within %s (check node protocol and interface %q)", startupTimeout, iface)
+			if lastDialErr != nil {
+				reason += fmt.Sprintf("; local proxy connection via %q failed: %v", proxyInterface, lastDialErr)
+			}
 			if detail := stderr.String(); detail != "" {
 				reason += ": " + detail
 			}
