@@ -139,3 +139,28 @@ func TestRenameNodeUpdatesSubscriptionRemark(t *testing.T) {
 	if parsed.Name != node.Name { t.Fatalf("parsed name=%q want %q", parsed.Name, node.Name) }
 }
 
+
+
+func TestParseDocumentReturnsInvalidConfigLines(t *testing.T) {
+	valid := "vless://11111111-1111-4111-8111-111111111111@example.test:443#valid"
+	invalidOne := "vless://missing-port"
+	invalidTwo := "unsupported://example.test:443"
+	body := strings.Join([]string{valid, "# comment", "", invalidOne, invalidTwo, "name,server,port"}, "\n")
+
+	nodes, invalid, err := ParseDocumentWithDiagnostics([]byte(body), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("parsed nodes=%d, want 1", len(nodes))
+	}
+	want := []string{invalidOne, invalidTwo}
+	if len(invalid) != len(want) {
+		t.Fatalf("invalid lines=%q, want %q", invalid, want)
+	}
+	for i := range want {
+		if invalid[i] != want[i] {
+			t.Fatalf("invalid line %d=%q, want %q", i, invalid[i], want[i])
+		}
+	}
+}
