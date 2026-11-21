@@ -224,7 +224,9 @@ func ooklaDownloadURL(uploadURL string) (string, error) {
 }
 
 func resolveOoklaUploadURL(ctx context.Context, client *http.Client, target string) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, target, nil)
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodHead, target, nil)
 	if err != nil {
 		return target
 	}
@@ -366,7 +368,7 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 		case <-done:
 			elapsed := time.Since(start).Seconds()
 			total := transferred.Load()
-			if total == 0 && firstErr != nil {
+			if firstErr != nil {
 				return 0, firstErr
 			}
 			if total == 0 || elapsed <= 0 {
