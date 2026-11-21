@@ -7,7 +7,7 @@
     "timeout": "30s"
   },
   "protocols": {
-    "enabled": ["vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"]
+    "enabled": ["vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "tuic", "socks", "http"]
   },
   "url_test": {
     "url": "https://www.gstatic.com/generate_204",
