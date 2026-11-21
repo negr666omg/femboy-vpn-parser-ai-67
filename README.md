@@ -5,8 +5,8 @@ Linux-first Go CLI for parsing and deduplicating VLESS/VMess/Trojan/Shadowsocks/
 ## Build from source
 
 ```bash
-tar -xzf subwatch-source-0.3.8.tar.gz -C subwatch-source
-cd subwatch-source
+git clone https://github.com/negr666omg/femboy-vpn-parser-ai-67.git
+cd femboy-vpn-parser-ai-67
 go test ./...
 go vet ./...
 go build -trimpath -ldflags='-s -w' -o sw ./cmd/subwatch
@@ -52,7 +52,7 @@ See [`config.example.json`](./config.example.json). All settings are optional; d
 - `url_test`: URL used for the reachability check, concurrency, and timeout.
 - `speed_test.provider`: speed-test backend, either `cloudflare` (default) or `ookla`. Ookla retrieves the public Speedtest.net server list through each tested node, probes up to 12 candidates in parallel through that same proxy, and selects the lowest-latency reachable server. Each direction runs for up to 8 seconds. The displayed live rate is calculated from bytes as they arrive; the final speed and pass/fail thresholds use the maximum rolling 2-second average, so individual request boundaries do not create artificial zero readings or make one failed connection invalidate the other workers. No server ID, API key, or separate Ookla CLI installation is needed. When `ookla` is selected, Cloudflare-only settings are automatically ignored; you do not need to delete or comment them out.
 - `speed_test`: concurrency, overall `timeout`, `max_duration`, and minimum download/upload Mbps are shared by both providers. Ookla is capped at 8 seconds per direction (or the lower configured `max_duration`) to avoid unnecessarily long tests. `first_byte_timeout`, `sample_interval`, `download_bytes`, `upload_bytes`, `download_url`, and `upload_url` apply only to `cloudflare`; they are automatically disabled for `ookla`. The Cloudflare provider reports the fastest observed sample interval. The download URL may contain `{bytes}`; the upload URL must accept a raw HTTP `POST` body and return 2xx.
-- `service_check`: concurrency, timeout, optional exit-IP lookup, automatic node renaming, GeoIP endpoint, name template (`{flag}`, `{country}`, `{download}`, `{upload}`), and Mbps decimal precision. The default name is `🇩🇪 Germany 70↓34↑`. Existing templates that contain `{flag}` but omit `{country}` automatically get the country name inserted after the flag. If GeoIP is unavailable, the node is still renamed using `🌐 Unknown`. GeoIP requests always go through the tested proxy and use short, bounded fallbacks.
+- `service_check`: concurrency, timeout, optional exit-IP lookup, automatic node renaming, GeoIP endpoint and name template (`{flag}`, `{country}`, `{download}`, `{upload}`). Speed values in node names are rounded to whole Mbps. The default name is `🇩🇪 Germany 70↓34↑`. Existing templates that contain `{flag}` but omit `{country}` automatically get the country name inserted after the flag. If GeoIP is unavailable, the node is still renamed using `🌐 Unknown`. GeoIP requests always go through the tested proxy and use short, bounded fallbacks.
 - `output.directory`: output directory. Stage result files are always plain URI-only `.txt` files and are split by protocol, for example `url-test-finished-vless.txt`, `speed-test-finished-vless.txt` and `gemini-vless.txt`.
 - `output.gemini_file`: when `true` (default), create a separate `gemini.txt` plus `gemini-<protocol>.txt` lists. When `false`, do not create a Gemini-only file; instead rename Gemini-available nodes by appending `Gemini 🐱` to their remark and refresh all earlier files in which those nodes appear, including `all.txt` and both stage/protocol lists.
 
@@ -69,7 +69,7 @@ Stage timeouts are independently configurable. CLI flags override the config fil
 ./sw run --source-timeout 2m
 ```
 
-For compatibility, an old `config.json` containing a `final_check` object is accepted, but that obsolete setting is ignored. The duplicate stage no longer exists.
+For compatibility, older config files may still contain `final_check`, `service_check.speed_decimals`, `output.split_by_protocol` or `output.subscription_text`; these obsolete settings are accepted but ignored. Speed labels are rounded to whole Mbps, and stage/protocol URI files are always written. The duplicate stage no longer exists.
 
 ## Output files
 
