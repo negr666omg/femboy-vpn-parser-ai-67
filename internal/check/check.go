@@ -63,7 +63,10 @@ func URLTest(ctx context.Context, client *http.Client, target string) (bool, int
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	return resp.StatusCode >= 200 && resp.StatusCode < 400, elapsed, nil
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return false, elapsed, fmt.Errorf("URL test returned HTTP %s", resp.Status)
+	}
+	return true, elapsed, nil
 }
 
 type SpeedProgress struct {
