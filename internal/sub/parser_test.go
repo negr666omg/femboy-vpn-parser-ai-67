@@ -133,15 +133,34 @@ func TestRealityUnsafeFingerprintFallsBackToChrome(t *testing.T) {
 }
 
 func TestRenameNodeUpdatesSubscriptionRemark(t *testing.T) {
-	node, err := ParseURI("vless://11111111-1111-4111-8111-111111111111@example.com:443#old-name")
-	if err != nil { t.Fatal(err) }
-	RenameNode(&node, "🇩🇪 70↓34↑")
-	if node.Name != "🇩🇪 70↓34↑" || !strings.Contains(node.URI, "#") {
+	node, err := ParseURI("vless://11111111-1111-4111-8111-111111111111@example.com:443?type=grpc&security=reality&sni=example.com&fp=firefox#old%20name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantName = "🇩🇪 Germany 70↓34↑"
+	if err := RenameNode(&node, wantName); err != nil {
+		t.Fatalf("RenameNode: %v", err)
+	}
+	if node.Name != wantName || !strings.Contains(node.URI, "#") {
 		t.Fatalf("rename was not written to URI: name=%q uri=%q", node.Name, node.URI)
 	}
 	parsed, err := ParseURI(node.URI)
-	if err != nil { t.Fatal(err) }
-	if parsed.Name != node.Name { t.Fatalf("parsed name=%q want %q", parsed.Name, node.Name) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Name != node.Name {
+		t.Fatalf("parsed name=%q want %q", parsed.Name, node.Name)
+	}
+	if parsed.Outbound["server"] != "example.com" || parsed.Outbound["type"] != "vless" {
+		t.Fatalf("renaming changed VLESS connection settings: %#v", parsed.Outbound)
+	}
+}
+
+func TestRenameNodeRejectsMalformedURI(t *testing.T) {
+	node := Node{URI: "vless://%zz"}
+	if err := RenameNode(&node, "🌐 Unknown 0↓0↑"); err == nil {
+		t.Fatal("expected malformed URI to return a rename error")
+	}
 }
 
 
