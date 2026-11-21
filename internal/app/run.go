@@ -643,7 +643,11 @@ func sourceProgressTitle(reference string) string {
 	if parsed, err := url.Parse(reference); err == nil && parsed.Scheme != "" {
 		scheme := strings.ToLower(parsed.Scheme)
 		switch scheme {
-		case "http", "https", "vless", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "socks", "socks5":
+		case "http", "https":
+			if parsed.Host != "" {
+				return parsed.Host
+			}
+		case "vless", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "socks", "socks5":
 			if parsed.Host != "" {
 				return scheme + "://" + parsed.Host
 			}
@@ -660,14 +664,14 @@ func sourceProgressTitle(reference string) string {
 }
 
 func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string {
-	identity := sourceProgressTitle(progress.Reference)
-	head := "[1/4] PARSE"
+	identity := cleanLiveText(sourceProgressTitle(progress.Reference))
+	head := "[PARSE]"
 	if progress.Total > 0 {
-		head += fmt.Sprintf(" | %d/%d | loaded: %d | skipped: %d", progress.Index, progress.Total, progress.Loaded, progress.Skipped)
+		head = fmt.Sprintf("[PARSE %d/%d ok:%d skip:%d]", progress.Index, progress.Total, progress.Loaded, progress.Skipped)
 	}
 	detail := cleanLiveText(progress.Phase)
 	if progress.Phase == "parsing" {
-		detail = fmt.Sprintf("parsing lines %d/%d | nodes: %d | invalid: %d", progress.LinesProcessed, progress.TotalLines, progress.Nodes, progress.Invalid)
+		detail = fmt.Sprintf("lines %d/%d | nodes %d | bad %d", progress.LinesProcessed, progress.TotalLines, progress.Nodes, progress.Invalid)
 	}
 	line := strings.TrimSpace(head + " | " + identity + " | " + detail)
 	if terminalWidth > 0 {
