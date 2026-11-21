@@ -76,9 +76,9 @@ For compatibility, older config files may still contain `final_check`, `service_
 The output directory contains only these result groups:
 
 - `all.txt` — every parsed proxy URI from all sources (duplicates included).
-- `failed.txt` — a combined report of all recorded failures: source download/parse errors, malformed or unsupported config lines, URL-test failures, speed-test failures, Gemini/service failures and node-renaming errors. Each entry includes its stage, reason and URI when available.
 - `url-tested.txt` and `url-tested-<protocol>.txt` — all URL-test-passed nodes and their per-protocol subsets.
 - `speedtested.txt` and `speedtested-<protocol>.txt` — nodes that passed both download and upload thresholds and their per-protocol subsets.
+- `failed.txt` — a combined report of all recorded failures: source download/parse errors, malformed or unsupported config lines, URL-test failures, speed-test failures, Gemini/service failures and node-renaming errors. Each entry includes its stage, reason and URI when available.
 - `gemini.txt` and `gemini-<protocol>.txt` — nodes classified as Gemini `available`, created when `output.gemini_file` is `true`. When it is `false`, Gemini availability is marked in the node name across all applicable earlier files instead.
 
 `selected` means the internal list after deduplication and filtering by `protocols.enabled`; it does not mean URL-test-passed or working. It is an intermediate implementation detail and is no longer written to disk. Failed lists, `unique.txt`, `tested.txt`, `final.txt`, service-check dumps and `report.csv` are intentionally omitted to keep the output directory minimal.
