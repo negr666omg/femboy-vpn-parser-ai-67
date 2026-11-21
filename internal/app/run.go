@@ -1365,6 +1365,10 @@ func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, 
 }
 
 
+func urlStageNodeName(country string) string {
+	return countryFlag(strings.ToUpper(strings.TrimSpace(country)))
+}
+
 func renameNodeAfterURL(parent context.Context, n *sub.Node, opts Options) string {
 	if n == nil {
 		return "cannot rename a nil node"
@@ -1372,12 +1376,12 @@ func renameNodeAfterURL(parent context.Context, n *sub.Node, opts Options) strin
 	if err := ensureNodeCountry(parent, n, opts); err != nil {
 		return err.Error()
 	}
-	flag := countryFlag(n.Country)
-	if flag == "" {
+	name := urlStageNodeName(n.Country)
+	if name == "" {
 		return "GeoIP country lookup returned an invalid country code"
 	}
 	// Speed placeholders are intentionally omitted until both measurements exist.
-	sub.RenameNode(n, flag)
+	sub.RenameNode(n, name)
 	return ""
 }
 
