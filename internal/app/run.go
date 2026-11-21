@@ -1487,32 +1487,35 @@ func ensureNodeCountry(parent context.Context, n *sub.Node, opts Options) error 
 		n.Country = strings.ToUpper(strings.TrimSpace(n.Country))
 		return nil
 	}
-
-	// Bound each GeoIP provider independently. A stalled first provider must
-	// not consume the entire service timeout and prevent fallback providers.
-	geoCtx, cancelGeo := context.WithTimeout(parent, 10*time.Second)
-	defer cancelGeo()
-	country := lookupCountry(geoCtx, nil, opts.GeoIPURL)
-	if country == "" {
-		fallbackCtx, cancelFallback := context.WithTimeout(parent, 6*time.Second)
-		country = check.LookupIP(fallbackCtx, nil).Country
-		cancelFallback()
-	}
-	country = strings.ToUpper(strings.TrimSpace(country))
-	if countryFlag(country) == "" {
-		return fmt.Errorf("GeoIP country lookup failed")
-	}
-	n.Country = country
-	return nil
+	return withNodeClient(parent, *n, opts, opts.ServiceTimeout, func(ctx context.Context, client *http.Client) error {
+		// Bound each GeoIP provider independently. A stalled first provider
+		// must not consume the entire service timeout and prevent fallbacks.
+		geoCtx, cancelGeo := context.WithTimeout(ctx, 10*time.Second)
+		country := lookupCountry(geoCtx, client, opts.GeoIPURL)
+		cancelGeo()
+		if country == "" {
+			fallbackCtx, cancelFallback := context.WithTimeout(ctx, 6*time.Second)
+			country = check.LookupIP(fallbackCtx, client).Country
+			cancelFallback()
+		}
+		country = strings.ToUpper(strings.TrimSpace(country))
+		if countryFlag(country) == "" {
+			return fmt.Errorf("GeoIP country lookup failed")
+		}
+		n.Country = country
+		return nil
+	})
 }
 
-func lookupCountry(ctx context.Context, _ *http.Client, endpoint string) string {
+func lookupCountry(ctx context.Context, client *http.Client, endpoint string) string {
+	if client == nil {
+		return ""
+	}
 	if strings.TrimSpace(endpoint) == "" {
 		endpoint = "https://ipwho.is/"
 	}
 	endpoints := []string{endpoint, "https://ipapi.co/json/", "https://api.country.is/"}
 	seen := make(map[string]bool, len(endpoints))
-	client := &http.Client{Timeout: 4 * time.Second}
 	for _, target := range endpoints {
 		target = strings.TrimSpace(target)
 		if target == "" || seen[target] {
