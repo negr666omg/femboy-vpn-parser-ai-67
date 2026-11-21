@@ -21,7 +21,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 	data := `{
   "network":{"interface":"throne-tun","isolate_source_downloads":true},
-  "sources":{"file":"subs.txt"},
+  "sources":{"file":"subs.txt","timeout":"90s"},
   "protocols":{"enabled":["vless","shadowsocks"]},
   "url_test":{"url":"https://example.com/204","concurrency":6,"timeout":"9s"},
   "speed_test":{"concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
@@ -42,7 +42,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if opts.URLConcurrency != 6 || opts.SpeedConcurrency != 3 || opts.ServiceConcurrency != 2 {
 		t.Fatalf("unexpected concurrency: %+v", opts)
 	}
-	if opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second || opts.FirstByteTimeout != 6*time.Second || opts.MaxSpeedDuration != 17*time.Second || opts.SpeedSampleInterval != 500*time.Millisecond {
+	if opts.SourceTimeout != 90*time.Second || opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second || opts.FirstByteTimeout != 6*time.Second || opts.MaxSpeedDuration != 17*time.Second || opts.SpeedSampleInterval != 500*time.Millisecond {
 		t.Fatalf("unexpected timeouts: %+v", opts)
 	}
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
@@ -53,6 +53,28 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	}
 	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
 		t.Fatalf("custom speed-test settings were not loaded: %+v", opts)
+	}
+}
+
+func TestSourceTimeoutMustBePositive(t *testing.T) {
+	for _, value := range []string{"0s", "-1s", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			data := `{"sources":{"timeout":"` + value + `"}}`
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "sources.timeout") {
+				t.Fatalf("expected invalid sources.timeout error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDefaultSourceTimeout(t *testing.T) {
+	if got := DefaultOptions().SourceTimeout; got != 30*time.Second {
+		t.Fatalf("default source timeout = %s, want 30s", got)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/negr666omg/subwatch/internal/app"
 )
@@ -49,10 +50,18 @@ func run(args []string) error {
 		fmt.Printf("Initialized %s (sources.txt, config.json)\n", strings.TrimRight(*dir, "/"))
 		return nil
 	case "__fetch-source":
-		if len(args) != 0 {
-			return fmt.Errorf("__fetch-source does not accept arguments")
+		fs := flag.NewFlagSet("__fetch-source", flag.ContinueOnError)
+		timeout := fs.Duration("timeout", 30*time.Second, "subscription download timeout")
+		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
 		}
-		return app.FetchSourceCommand()
+		if fs.NArg() != 0 {
+			return fmt.Errorf("__fetch-source does not accept positional arguments")
+		}
+		return app.FetchSourceCommand(*timeout)
 	case "interfaces":
 		if len(args) > 0 {
 			return fmt.Errorf("interfaces does not accept options")
@@ -81,6 +90,7 @@ func runCommand(args []string) error {
 	urlTimeout := fs.Duration("url-timeout", 0, "URL-test timeout")
 	speedTimeout := fs.Duration("speed-timeout", 0, "speed-test timeout")
 	serviceTimeout := fs.Duration("service-timeout", 0, "service-check timeout")
+	sourceTimeout := fs.Duration("source-timeout", 0, "subscription download timeout")
 	testURL := fs.String("url", "", "override URL-test target")
 	downloadURL := fs.String("download-url", "", "override speed-test download URL (supports {bytes})")
 	uploadURL := fs.String("upload-url", "", "override speed-test upload URL")
@@ -153,6 +163,9 @@ func runCommand(args []string) error {
 	}
 	if visited["service-timeout"] {
 		opts.ServiceTimeout = *serviceTimeout
+	}
+	if visited["source-timeout"] {
+		opts.SourceTimeout = *sourceTimeout
 	}
 	if visited["url"] {
 		opts.URL = *testURL
