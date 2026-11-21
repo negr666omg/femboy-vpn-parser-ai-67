@@ -403,7 +403,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 				return err
 			}
 		} else {
-			failedItems = append(failedItems, failureRecordFromNode("URL TEST", completed, completed.URLError))
+			failure := failureRecordFromNode("URL TEST", completed, completed.URLError)
+			failure.LatencyMS = completed.URLLatencyMS
+			failedItems = append(failedItems, failure)
 		}
 		if completed.RenameError != "" {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
@@ -2073,11 +2075,12 @@ func writeAtomic(path string, data []byte) error {
 }
 
 type failureRecord struct {
-	Stage    string
-	Name     string
-	Protocol string
-	URI      string
-	Reason   string
+	Stage     string
+	Name      string
+	Protocol  string
+	URI       string
+	Reason    string
+	LatencyMS int64
 }
 
 func failureRecordFromNode(stage string, node sub.Node, reason string) failureRecord {
@@ -2113,6 +2116,9 @@ func writeFailureReport(path, target string, failures []failureRecord) error {
 			fmt.Fprintf(&b, " (%s)", cleanLiveText(failure.Protocol))
 		}
 		fmt.Fprintf(&b, "\nReason: %s\n", reason)
+		if failure.LatencyMS > 0 {
+			fmt.Fprintf(&b, "Latency: %d ms\n", failure.LatencyMS)
+		}
 		if failure.URI != "" {
 			fmt.Fprintf(&b, "URI: %s\n", cleanLiveText(failure.URI))
 		}
@@ -2129,7 +2135,6 @@ func writeSubscription(path string, nodes []sub.Node) error {
 	return writeAtomic(path, []byte(b.String()))
 }
 
-// writeInvalidLines keeps rejected proxy entries as plain input lines.
 func writeReport(path string, nodes []sub.Node) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
