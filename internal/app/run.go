@@ -740,6 +740,23 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		// Keep Gemini's suffix in the stable snapshots too: "... 🧱 Gemini 🐱".
 		applyNodeUpdatesByIdentity(stableURLNodes, finalNodes)
 		applyNodeUpdatesByIdentity(stableSpeedNodes, finalNodes)
+		// Gemini propagation copies the final URI remark. Re-apply the
+		// stage-specific stability marker afterwards so URL-stable nodes keep
+		// 🧱 even when they have not qualified for the speed-stable set.
+		for _, item := range []struct {
+			nodes  []sub.Node
+			stable []sub.Node
+		}{
+			{nodes: parsed, stable: stableURLNodes},
+			{nodes: urlPassed, stable: stableURLNodes},
+			{nodes: speedPassed, stable: stableSpeedNodes},
+			{nodes: stableURLNodes, stable: stableURLNodes},
+			{nodes: stableSpeedNodes, stable: stableSpeedNodes},
+		} {
+			if err := markStableNodes(item.nodes, item.stable); err != nil {
+				return err
+			}
+		}
 		if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
 			return err
 		}
