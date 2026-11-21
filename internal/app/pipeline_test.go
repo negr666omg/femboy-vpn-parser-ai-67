@@ -1098,6 +1098,56 @@ func TestLoadSourcesMarksTransientRemoteFailures(t *testing.T) {
 	}
 }
 
+func TestSourceDownloadStopsAfterThreeRetriesAndSkips(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sources.txt")
+	if err := os.WriteFile(path, []byte("https://unreachable.example/sub"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	fetchCalls, waitCalls := 0, 0
+	var progressPhases []string
+	sources, err := loadSourcesWithFetcherProgressAndWait(
+		context.Background(), path, time.Second,
+		func(context.Context, string, time.Duration) ([]byte, error) {
+			fetchCalls++
+			return nil, errors.New("dial tcp: connection refused")
+		},
+		func(progress sourceProgress) {
+			progressPhases = append(progressPhases, progress.Phase)
+		},
+		func(context.Context) error {
+			waitCalls++
+			return nil
+		},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetchCalls != maxSourceDownloadRetries+1 {
+		t.Fatalf("fetch attempts = %d, want initial attempt plus %d retries", fetchCalls, maxSourceDownloadRetries)
+	}
+	if waitCalls != maxSourceDownloadRetries {
+		t.Fatalf("retry waits = %d, want %d", waitCalls, maxSourceDownloadRetries)
+	}
+	if len(sources) != 1 || sources[0].LoadError == nil || !sources[0].TransientConnectionError {
+		t.Fatalf("unreachable source should be returned as skipped transient failure: %#v", sources)
+	}
+	if !strings.Contains(sources[0].LoadError.Error(), "after 3 retries") {
+		t.Fatalf("missing retry count in source error: %v", sources[0].LoadError)
+	}
+	foundSkipped := false
+	for _, phase := range progressPhases {
+		if phase == "failed after 3 retries; skipped" {
+			foundSkipped = true
+		}
+	}
+	if !foundSkipped {
+		t.Fatalf("missing final skipped progress state: %v", progressPhases)
+	}
+}
+
 func TestSourceRetryWaitStopsOnCancellation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sources.txt")
