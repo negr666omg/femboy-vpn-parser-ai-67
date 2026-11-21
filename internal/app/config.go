@@ -44,6 +44,8 @@ type Options struct {
 	LookupIP           bool
 	RemoteUpload       RemoteUploadOptions
 	LiveDisplayMode    string
+	StabilityMaxPingMS int64
+	StabilityState     *StabilityState
 }
 
 type RemoteUploadOptions struct {
@@ -113,6 +115,9 @@ type fileConfig struct {
 	LiveDisplay struct {
 		Mode string `json:"mode"`
 	} `json:"live_display"`
+	Stability struct {
+		MaxPingMS *int64 `json:"max_ping_ms"`
+	} `json:"stability"`
 	Output struct {
 		Directory        string `json:"directory"`
 		GeminiFile       *bool  `json:"gemini_file"`
@@ -121,7 +126,7 @@ type fileConfig struct {
 
 func DefaultOptions() Options {
 	return Options{
-		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true, LiveDisplayMode: "after_result",
+		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true, LiveDisplayMode: "after_result", StabilityMaxPingMS: 100,
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4, SpeedProvider: "cloudflare",
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
@@ -313,6 +318,12 @@ func LoadOptions(path string) (Options, error) {
 		}
 		opts.LiveDisplayMode = mode
 	}
+	if cfg.Stability.MaxPingMS != nil {
+		if *cfg.Stability.MaxPingMS <= 0 {
+			return opts, fmt.Errorf("stability.max_ping_ms must be greater than zero")
+		}
+		opts.StabilityMaxPingMS = *cfg.Stability.MaxPingMS
+	}
 	if cfg.Output.Directory != "" {
 		opts.OutDir = cfg.Output.Directory
 	}
@@ -413,6 +424,9 @@ func ExampleConfig() string {
   },
   "live_display": {
     "mode": "after_result"
+  },
+  "stability": {
+    "max_ping_ms": 100
   },
   "output": {
     "directory": "out",
