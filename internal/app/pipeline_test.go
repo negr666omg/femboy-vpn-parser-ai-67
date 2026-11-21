@@ -513,7 +513,7 @@ func TestClearProtocolSubscriptionsPreservesUnrelatedFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := clearProtocolSubscriptions(dir, "url-test-finished"); err != nil {
+	if err := clearProtocolSubscriptions(dir, "url-tested"); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"url-tested-vless.txt", "url-tested-ss.txt"} {
