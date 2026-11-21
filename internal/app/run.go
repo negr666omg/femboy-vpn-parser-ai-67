@@ -124,7 +124,8 @@ func isTransientNetworkError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	for _, marker := range []string{
-		"i/o timeout", "unexpected eof", "server closed idle connection", "timed out", "timeout", "deadline exceeded",
+		"i/o timeout", "unexpected eof", "server closed idle connection", "timed out", "deadline exceeded",
+		"handshake timeout", "request timeout", "timeout awaiting", "timeout expired",
 		"connection refused", "connection reset", "connection aborted",
 		"connection closed by remote host", "connection lost", "broken pipe",
 		"network is unreachable", "network is down", "no route to host",
