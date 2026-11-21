@@ -128,23 +128,50 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.URL == "" {
 		opts.URL = "https://www.gstatic.com/generate_204"
 	}
-	if opts.SpeedDownloadURL == "" {
-		opts.SpeedDownloadURL = "https://speed.cloudflare.com/__down?bytes={bytes}"
+	if opts.SpeedProvider == "" {
+		opts.SpeedProvider = "cloudflare"
 	}
-	if opts.SpeedUploadURL == "" {
-		opts.SpeedUploadURL = "https://speed.cloudflare.com/__up"
+	opts.SpeedProvider = strings.ToLower(strings.TrimSpace(opts.SpeedProvider))
+	if opts.SpeedProvider != "cloudflare" && opts.SpeedProvider != "ookla" {
+		return fmt.Errorf("speed_test.provider must be cloudflare or ookla")
 	}
-	if opts.DownloadBytes == 0 {
-		opts.DownloadBytes = 8 << 20
+	if opts.MaxSpeedDuration <= 0 {
+		opts.MaxSpeedDuration = DefaultOptions().MaxSpeedDuration
 	}
-	if opts.UploadBytes == 0 {
-		opts.UploadBytes = 4 << 20
-	}
-	if opts.DownloadBytes < 64*1024 || opts.UploadBytes < 64*1024 {
-		return fmt.Errorf("download/upload test payload must be at least 64 KiB")
-	}
-	if opts.DownloadBytes > 100<<20 || opts.UploadBytes > 100<<20 {
-		return fmt.Errorf("download/upload test payload cannot exceed 100 MiB")
+	if opts.SpeedProvider == "ookla" {
+		// These settings are specific to the Cloudflare HTTP endpoint and do
+		// not apply to Ookla's automatically selected Speedtest.net server.
+		opts.FirstByteTimeout = 0
+		opts.SpeedSampleInterval = 0
+		opts.DownloadBytes = 0
+		opts.UploadBytes = 0
+		opts.SpeedDownloadURL = ""
+		opts.SpeedUploadURL = ""
+	} else {
+		if opts.SpeedDownloadURL == "" {
+			opts.SpeedDownloadURL = "https://speed.cloudflare.com/__down?bytes={bytes}"
+		}
+		if opts.SpeedUploadURL == "" {
+			opts.SpeedUploadURL = "https://speed.cloudflare.com/__up"
+		}
+		if opts.DownloadBytes == 0 {
+			opts.DownloadBytes = 8 << 20
+		}
+		if opts.UploadBytes == 0 {
+			opts.UploadBytes = 4 << 20
+		}
+		if opts.FirstByteTimeout <= 0 {
+			opts.FirstByteTimeout = DefaultOptions().FirstByteTimeout
+		}
+		if opts.SpeedSampleInterval <= 0 {
+			opts.SpeedSampleInterval = DefaultOptions().SpeedSampleInterval
+		}
+		if opts.DownloadBytes < 64*1024 || opts.UploadBytes < 64*1024 {
+			return fmt.Errorf("download/upload test payload must be at least 64 KiB")
+		}
+		if opts.DownloadBytes > 100<<20 || opts.UploadBytes > 100<<20 {
+			return fmt.Errorf("download/upload test payload cannot exceed 100 MiB")
+		}
 	}
 	if len(opts.Protocols) == 0 {
 		opts.Protocols = DefaultOptions().Protocols
