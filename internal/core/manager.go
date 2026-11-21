@@ -2,6 +2,7 @@ package core
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -20,7 +21,10 @@ import (
 	"time"
 )
 
-const coreVersion = "1.14.4"
+const (
+	coreVersion   = "1.14.4"
+	startupTimeout = 20 * time.Second
+)
 
 type Instance struct {
 	ProxyURL string
@@ -168,6 +172,27 @@ func (p *progressReader) Read(buf []byte) (int, error) {
 	return n, err
 }
 
+type cappedLog struct {
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (l *cappedLog) Write(p []byte) (int, error) {
+	original := len(p)
+	remaining := l.limit - l.buffer.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = l.buffer.Write(p)
+	}
+	return original, nil
+}
+
+func (l *cappedLog) String() string {
+	return strings.TrimSpace(l.buffer.String())
+}
+
 func Start(ctx context.Context, binary string, outbound map[string]any, iface string, namespace ...string) (*Instance, error) {
 	proxyBin, err := FindOrDownload(binary)
 	if err != nil {
@@ -221,14 +246,15 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 	var cmd *exec.Cmd
 	if namespaceName != "" { cmd = (&NetworkNamespace{Name: namespaceName}).Command(ctx, proxyBin, "run", "-c", cfgPath) } else { cmd = exec.CommandContext(ctx, proxyBin, "run", "-c", cfgPath) }
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	stderr := &cappedLog{limit: 32 * 1024}
+	cmd.Stderr = stderr
 	if err = cmd.Start(); err != nil {
 		os.RemoveAll(tmpDir)
 		return nil, err
 	}
 	inst := &Instance{ProxyURL: fmt.Sprintf("http://%s:%d", listenAddr, port), cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir}
 	go func() { inst.done <- cmd.Wait() }()
-	deadline := time.NewTimer(8 * time.Second)
+	deadline := time.NewTimer(startupTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -244,13 +270,23 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 			if e == nil {
 				e = errors.New("sing-box exited before proxy became ready")
 			}
+			if detail := stderr.String(); detail != "" {
+				return nil, fmt.Errorf("%w: %s", e, detail)
+			}
 			return nil, e
 		case <-ctx.Done():
 			inst.Close()
+			if detail := stderr.String(); detail != "" {
+				return nil, fmt.Errorf("%w (sing-box: %s)", ctx.Err(), detail)
+			}
 			return nil, ctx.Err()
 		case <-deadline.C:
 			inst.Close()
-			return nil, fmt.Errorf("sing-box mixed inbound did not start (check node protocol and interface %q)", iface)
+			reason := fmt.Sprintf("sing-box mixed inbound did not start within %s (check node protocol and interface %q)", startupTimeout, iface)
+			if detail := stderr.String(); detail != "" {
+				reason += ": " + detail
+			}
+			return nil, errors.New(reason)
 		case <-ticker.C:
 		}
 	}
