@@ -3,6 +3,7 @@ package sub
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,106 @@ func TestParseURIProtocols(t *testing.T) {
 		})
 	}
 }
+
+func TestParseVMessAEADURI(t *testing.T) {
+	uri := "vmess://11111111-1111-4111-8111-111111111111@example.com:443?type=ws&security=tls&encryption=auto&sni=edge.example.com&host=cdn.example.com&path=%2Fvmess&fp=chrome#VMess%20AEAD"
+	node, err := ParseURI(uri)
+	if err != nil {
+		t.Fatalf("ParseURI: %v", err)
+	}
+	if node.Protocol != "vmess" || node.Outbound["type"] != "vmess" {
+		t.Fatalf("protocol=%q outbound=%#v", node.Protocol, node.Outbound)
+	}
+	if node.Outbound["uuid"] != "11111111-1111-4111-8111-111111111111" || node.Outbound["security"] != "auto" {
+		t.Fatalf("VMess identity/encryption fields=%#v", node.Outbound)
+	}
+	transport, ok := node.Outbound["transport"].(map[string]any)
+	if !ok || transport["type"] != "ws" || transport["path"] != "/vmess" {
+		t.Fatalf("VMess transport=%#v", node.Outbound["transport"])
+	}
+	headers, ok := transport["headers"].(map[string]string)
+	if !ok || headers["Host"] != "cdn.example.com" {
+		t.Fatalf("WebSocket headers=%#v", transport["headers"])
+	}
+	tls, ok := node.Outbound["tls"].(map[string]any)
+	if !ok || tls["enabled"] != true || tls["server_name"] != "edge.example.com" {
+		t.Fatalf("TLS options=%#v", node.Outbound["tls"])
+	}
+	utls, ok := tls["utls"].(map[string]any)
+	if !ok || utls["fingerprint"] != "chrome" {
+		t.Fatalf("uTLS options=%#v", tls["utls"])
+	}
+}
+
+func TestParseVMessURITransportVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		uriType string
+		wantTransport string
+	}{
+		{"tcp", "tcp", ""},
+		{"raw", "raw", ""},
+		{"none", "none", ""},
+		{"http", "http", "http"},
+		{"httpupgrade", "httpupgrade", "httpupgrade"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uri := "vmess://11111111-1111-4111-8111-111111111111@example.com:443?type=" + tc.uriType + "&encryption=aes-128-gcm&security=0#node"
+			node, err := ParseURI(uri)
+			if err != nil {
+				t.Fatalf("ParseURI: %v", err)
+			}
+			if node.Outbound["security"] != "aes-128-gcm" {
+				t.Fatalf("VMess encryption=%#v", node.Outbound["security"])
+			}
+			transport, exists := node.Outbound["transport"]
+			if tc.wantTransport == "" {
+				if exists {
+					t.Fatalf("unexpected transport for %s: %#v", tc.uriType, transport)
+				}
+			} else {
+				got, ok := transport.(map[string]any)
+				if !ok || got["type"] != tc.wantTransport {
+					t.Fatalf("transport=%#v, want type %q", transport, tc.wantTransport)
+				}
+			}
+			if _, exists := node.Outbound["tls"]; exists {
+				t.Fatalf("security=0 must not enable TLS: %#v", node.Outbound["tls"])
+			}
+		})
+	}
+}
+
+func TestRenameVMessAEADURIKeepsURIFormat(t *testing.T) {
+	original := "vmess://11111111-1111-4111-8111-111111111111@example.com:443?type=ws&security=tls&encryption=auto&host=cdn.example.com&path=%2Fvmess#old"
+	node, err := ParseURI(original)
+	if err != nil {
+		t.Fatalf("ParseURI: %v", err)
+	}
+	const renamed = "🌐 Unknown 80↓20↑"
+	if err := RenameNode(&node, renamed); err != nil {
+		t.Fatalf("RenameNode: %v", err)
+	}
+	parsedURL, err := url.Parse(node.URI)
+	if err != nil {
+		t.Fatalf("parse renamed URI: %v", err)
+	}
+	if parsedURL.User == nil || parsedURL.User.Username() != "11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("VMess UUID was not preserved: %q", node.URI)
+	}
+	if parsedURL.Fragment != renamed || !strings.Contains(parsedURL.RawQuery, "type=ws") {
+		t.Fatalf("VMess URI fields were not preserved: %q", node.URI)
+	}
+	parsedNode, err := ParseURI(node.URI)
+	if err != nil {
+		t.Fatalf("parse renamed VMess URI: %v", err)
+	}
+	if parsedNode.Name != renamed || parsedNode.Outbound["server"] != "example.com" {
+		t.Fatalf("renamed node=%#v", parsedNode)
+	}
+}
+
 func TestParseVMess(t *testing.T) {
 	n, err := ParseURI("vmess://eyJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsIm5ldCI6IndzIiwidGxzIjoidGxzIiwicHMiOiJ2bWVzcyJ9")
 	if err != nil {

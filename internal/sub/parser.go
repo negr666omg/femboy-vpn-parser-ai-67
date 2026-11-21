@@ -208,7 +208,7 @@ func truthy(value string) bool {
 
 func tlsOptions(q url.Values, defaultServer string) map[string]any {
 	security := strings.ToLower(q.Get("security"))
-	enabled := security == "tls" || security == "reality" || q.Get("tls") == "1" || q.Get("tls") == "true"
+	enabled := security == "tls" || security == "reality" || truthy(security) || truthy(q.Get("tls"))
 	if !enabled {
 		return nil
 	}
@@ -369,7 +369,73 @@ func vmessPayload(u *url.URL) string {
 	return raw
 }
 
+func parseVMessURI(u *url.URL) (map[string]any, error) {
+	host, port, err := hostPort(u)
+	if err != nil {
+		return nil, err
+	}
+	if u.User == nil || strings.TrimSpace(u.User.Username()) == "" {
+		return nil, errors.New("VMess URI requires a UUID")
+	}
+	q := u.Query()
+	security := strings.TrimSpace(q.Get("encryption"))
+	if security == "" {
+		security = "auto"
+	}
+	out := map[string]any{
+		"type": "vmess", "server": host, "server_port": port,
+		"uuid": u.User.Username(), "security": security,
+	}
+	alterID := 0
+	if rawAlterID := strings.TrimSpace(q.Get("aid")); rawAlterID != "" {
+		alterID, err = strconv.Atoi(rawAlterID)
+		if err != nil || alterID < 0 {
+			return nil, fmt.Errorf("invalid VMess alter ID %q", rawAlterID)
+		}
+	}
+	out["alter_id"] = alterID
+
+	transportType := strings.ToLower(strings.TrimSpace(q.Get("type")))
+	if transportType == "" {
+		transportType = "tcp"
+	}
+	switch transportType {
+	case "tcp", "raw", "none":
+		// Plain TCP: sing-box does not need an explicit transport object.
+	case "ws", "grpc", "httpupgrade", "http-upgrade", "http", "h2":
+		transportQuery := url.Values{}
+		transportQuery.Set("type", transportType)
+		transportQuery.Set("host", q.Get("host"))
+		transportQuery.Set("path", q.Get("path"))
+		if serviceName := q.Get("serviceName"); serviceName != "" {
+			transportQuery.Set("serviceName", serviceName)
+		}
+		transport := transportOptions(transportQuery)
+		if transport == nil {
+			return nil, fmt.Errorf("unsupported VMess transport %q", transportType)
+		}
+		out["transport"] = transport
+	default:
+		return nil, fmt.Errorf("unsupported VMess transport %q", transportType)
+	}
+
+	// HTTP/2 transport requires TLS even when the source omitted the
+	// security parameter. For other transports, security=tls/true enables it.
+	if transportType == "h2" && q.Get("security") == "" {
+		q.Set("security", "tls")
+	}
+	if tls := tlsOptions(q, host); tls != nil {
+		out["tls"] = tls
+	}
+	return out, nil
+}
+
 func parseVMess(u *url.URL) (map[string]any, error) {
+	// Modern VMess AEAD share links use UUID@host:port query syntax.
+	// Older links continue to use a Base64-encoded JSON payload.
+	if u.User != nil && u.Host != "" {
+		return parseVMessURI(u)
+	}
 	raw := vmessPayload(u)
 	b, err := decodeBase64(raw)
 	if err != nil {
@@ -703,7 +769,7 @@ func RenameNode(n *Node, name string) error {
 		return fmt.Errorf("parse node URI: %w", err)
 	}
 
-	if strings.EqualFold(u.Scheme, "vmess") {
+	if strings.EqualFold(u.Scheme, "vmess") && u.User == nil {
 		payload, decodeErr := decodeBase64(vmessPayload(u))
 		if decodeErr != nil {
 			return fmt.Errorf("decode VMess payload while renaming: %w", decodeErr)
