@@ -205,6 +205,10 @@ func runCommand(args []string) error {
 		return readErr
 	}
 	continuous := strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes")
+	if continuous {
+		opts.StabilityState = app.NewStabilityState()
+		fmt.Fprintf(os.Stdout, "[stability] ping must stay below %d ms in every cycle; stable speed also requires both configured minimums\n", opts.StabilityMaxPingMS)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cycle := 0
