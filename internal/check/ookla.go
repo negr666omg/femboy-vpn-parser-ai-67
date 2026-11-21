@@ -118,6 +118,9 @@ func fetchOoklaServers(ctx context.Context, client *http.Client, endpoint string
 	if len(servers) == 0 {
 		return nil, fmt.Errorf("Ookla returned an empty server list")
 	}
+	if len(servers) > 30 {
+		servers = servers[:30]
+	}
 	return servers, nil
 }
 
