@@ -62,8 +62,13 @@ func TestIsolatedSourceDownloadsRequireExplicitInterface(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"network":{"isolate_source_downloads":true}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "network.interface") {
-		t.Fatalf("expected explicit interface validation error, got %v", err)
+	opts, err := LoadOptions(path)
+	if err != nil {
+		t.Fatalf("the config should load before CLI overrides are applied: %v", err)
+	}
+	opts.OutDir = filepath.Join(dir, "out")
+	if err := Run(context.Background(), opts, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "network.interface") {
+		t.Fatalf("expected explicit interface validation error at run time, got %v", err)
 	}
 }
 
