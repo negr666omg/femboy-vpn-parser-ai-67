@@ -368,8 +368,12 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		} else if !passed {
 			n.URLError = "URL test returned non-success status"
 		}
-		if passed && opts.RenameNodes {
-			n.RenameError = renameNodeAfterURL(stageCtx, n, opts)
+		if opts.RenameNodes {
+			if passed {
+				n.RenameError = renameNodeAfterURL(stageCtx, n, opts)
+			} else if err := sub.RenameNode(n, urlStageNodeName("")); err != nil {
+				n.RenameError = err.Error()
+			}
 		}
 		live(*n, urlLiveDetail(*n))
 	}, func(completed sub.Node) error {
@@ -385,6 +389,15 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return stageErr
 	}
 	urlPassed := filterNodes(urlResults, func(n sub.Node) bool { return n.URLPassed })
+	// Keep every selected node's remark synchronized in all.txt too. Nodes
+	// that fail URL reachability cannot have a meaningful country/speed result,
+	// so they receive the explicit 🌐 Unknown fallback rather than the source name.
+	if opts.RenameNodes {
+		applyNodeUpdatesByIdentity(parsed, urlResults)
+		if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
+			return err
+		}
+	}
 	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
 		return err
 	}
