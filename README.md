@@ -47,6 +47,7 @@ See [`config.example.json`](./config.example.json). All settings are optional; d
 - `network.interface`: `auto` uses normal system routing. On Linux, selecting a physical interface (for example `eno1`) creates an isolated network namespace with a separate macvlan address obtained by DHCP; node traffic leaves through that interface without using the host VPN routing rules. This requires `iproute2`, `sudo`, `setpriv` (util-linux), and an installed DHCP client (`dhclient`). The first run asks for administrator authorization. The network must permit a second MAC address; some Wi-Fi adapters/access points do not. The host network configuration and DNS are not changed. Set `network.isolate_source_downloads` to `true` to route remote HTTP(S) subscription downloads through this namespace as well; this requires a specific interface. The source list itself and parsing remain local.
 - `network.isolate_source_downloads`: set to `true` to download HTTP(S) subscriptions from `sources.file` inside the same isolated namespace and through the selected `network.interface`. This requires a specific interface (not `auto`) and Linux. The default is `false`, preserving the previous host-network behavior. Reading `sources.file`, reading local source files, and parsing downloaded text still happen in the main process; only remote HTTP(S) downloads are isolated. The first-run sing-box binary download and optional SFTP upload remain outside this setting.
 - `sources.file`: source list path. Relative paths are resolved relative to the config file.
+- `sources.timeout`: maximum time allowed for each remote HTTP(S) subscription download, including downloads through the isolated interface. Uses Go duration syntax such as `"30s"`, `"2m"`, or `"5m"`; defaults to `"30s"`. Local files and inline links are not affected.
 - `protocols.enabled`: protocols to test (`vless`, `vmess`, `trojan`, `ss`, `hysteria2`, `tuic`, `socks`, `http`). Aliases `shadowsocks`, `hy2`, and `socks5` are accepted.
 - `url_test`: URL used for the reachability check, concurrency, and timeout.
 - `speed_test`: separate concurrency and overall timeout, first-byte timeout, maximum measurement duration after the first byte (per direction), sampling interval, independent download/upload Mbps thresholds, payload sizes, and custom HTTP URLs. The reported speed is the **fastest observed sample interval**, not the average across the full transfer. The download URL may contain `{bytes}`; the upload URL must accept a raw HTTP `POST` body and return 2xx.
@@ -63,6 +64,7 @@ Stage timeouts are independently configurable. CLI flags override the config fil
 ./sw run --url 'https://www.gstatic.com/generate_204'
 ./sw run --download-url 'https://speed.cloudflare.com/__down?bytes={bytes}' --upload-url 'https://speed.cloudflare.com/__up'
 ./sw run --min-download 8 --min-upload 8 --speed-timeout 85s
+./sw run --source-timeout 2m
 ```
 
 For compatibility, an old `config.json` containing a `final_check` object is accepted, but that obsolete setting is ignored. The duplicate stage no longer exists.
