@@ -454,7 +454,7 @@ func TestSourceProgressLineRedactsCredentialsAndFitsTerminal(t *testing.T) {
 		Reference: "https://user:secret@subscription.example/private?token=hidden",
 		Phase: "downloading",
 	}
-	if got := sourceProgressTitle(progress.Reference); got != "https://subscription.example" {
+	if got := sourceProgressTitle(progress.Reference); got != "subscription.example" {
 		t.Fatalf("source title leaked URL details or is unclear: %q", got)
 	}
 	line := formatSourceProgressLine(progress, 80)
@@ -467,10 +467,17 @@ func TestSourceProgressLineRedactsCredentialsAndFitsTerminal(t *testing.T) {
 	progress.Phase = "parsing"
 	progress.LinesProcessed, progress.TotalLines, progress.Nodes, progress.Invalid = 256, 1024, 74, 3
 	line = formatSourceProgressLine(progress, 120)
-	for _, want := range []string{"parsing lines 256/1024", "nodes: 74", "invalid: 3"} {
+	for _, want := range []string{"lines 256/1024", "nodes 74", "bad 3"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("missing parser progress %q in %q", want, line)
 		}
+	}
+	line = formatSourceProgressLine(sourceProgress{
+		Index: 1, Total: 9, Loaded: 0, Reference: "https://user:secret@subscription.example/private?token=hidden",
+		Phase: "downloading",
+	}, 80)
+	if !strings.Contains(line, "subscription.example") || !strings.Contains(line, "downloading") {
+		t.Fatalf("narrow terminal hid the active source or action: %q", line)
 	}
 }
 
