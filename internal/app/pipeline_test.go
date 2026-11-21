@@ -379,7 +379,7 @@ func TestLoadSourcesWithFetcherUsesNamespaceFetcherOnlyForRemoteURLs(t *testing.
 		t.Fatal(err)
 	}
 	sourcesPath := filepath.Join(dir, "sources.txt")
-	contents := "https://subscription.example/list\\n" + localPath + "\\nvless://inline@example.test:443\\n"
+	contents := "https://subscription.example/list\n" + localPath + "\nvless://inline@example.test:443\n"
 	if err := os.WriteFile(sourcesPath, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
