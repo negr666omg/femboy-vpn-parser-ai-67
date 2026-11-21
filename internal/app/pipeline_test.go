@@ -945,6 +945,39 @@ func TestNodeNameAddsCountryToExistingCustomTemplate(t *testing.T) {
 	}
 }
 
+func TestCountryLookupParsesConfiguredGeoIPProvider(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/json" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"country_code":"NL","country":"Netherlands"}`))
+	}))
+	defer server.Close()
+
+	got := lookupCountry(context.Background(), server.Client(), server.URL+"/json")
+	if got != "NL" {
+		t.Fatalf("lookupCountry() = %q, want NL", got)
+	}
+}
+
+func TestCountryLabelSupportsCommonExitRegions(t *testing.T) {
+	tests := []struct {
+		code, want string
+	}{
+		{"DE", "🇩🇪 Germany"},
+		{"NL", "🇳🇱 Netherlands"},
+		{"IR", "🇮🇷 Iran"},
+		{"RU", "🇷🇺 Russia"},
+	}
+	for _, test := range tests {
+		if got := urlStageNodeName(test.code); got != test.want {
+			t.Errorf("urlStageNodeName(%q) = %q, want %q", test.code, got, test.want)
+		}
+	}
+}
+
 func TestNodeNameUsesExplicitUnknownFallback(t *testing.T) {
 	got := renderNodeName("{flag} {country} {download}↓{upload}↑", "", 0, 0)
 	want := "🌐 Unknown 0↓0↑"
