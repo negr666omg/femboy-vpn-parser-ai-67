@@ -1007,6 +1007,12 @@ func filterProtocols(nodes []sub.Node, enabled []string) []sub.Node {
 	for _, p := range enabled {
 		allowed[p] = true
 	}
+	// Existing configs commonly enabled "hysteria2" before legacy Hysteria
+	// URI support was added. Treat that setting as enabling both Hysteria
+	// generations while still exporting their distinct protocol names.
+	if allowed["hysteria2"] {
+		allowed["hysteria"] = true
+	}
 	return filterNodes(nodes, func(n sub.Node) bool { return allowed[protocolOf(n)] })
 }
 
@@ -1749,9 +1755,10 @@ func runServiceCheck(parent context.Context, n sub.Node, opts Options) (string, 
 }
 
 func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, *http.Client) error) error {
-	startCtx, cancel := context.WithTimeout(parent, timeout+8*time.Second)
-	defer cancel()
-	inst, err := core.Start(startCtx, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
+	// Proxy startup has its own readiness deadline in core.Start. The configured
+	// stage timeout applies only to the actual HTTP test, not to local process
+	// startup; otherwise slow startup silently shortens the network timeout.
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -1761,20 +1768,18 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 		return err
 	}
 	defer check.CloseClient(client)
-	return fn(startCtx, client)
+	return fn(parent, client)
 }
 
 // withNodeProxy exposes the local sing-box HTTP CONNECT endpoint so Gemini can
 // use Throne-compatible TLS/HTTP2 without changing the other test stages.
 func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string) error) error {
-	startCtx, cancel := context.WithTimeout(parent, timeout+8*time.Second)
-	defer cancel()
-	inst, err := core.Start(startCtx, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
 	defer inst.Close()
-	return fn(startCtx, inst.ProxyURL)
+	return fn(parent, inst.ProxyURL)
 }
 
 func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
