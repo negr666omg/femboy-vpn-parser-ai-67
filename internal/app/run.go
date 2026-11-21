@@ -894,8 +894,14 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 	terminalRowsDrawn := false
 	render := func() {
 		if terminalWidth > 0 {
+				active := 0
+			for _, status := range statuses {
+				if status.active {
+					active++
+				}
+			}
 			header := fmt.Sprintf("[%s] %d/%d | active: %d | passed: %d | failed: %d",
-				label, done, len(nodes), countActiveWorkers(statuses), successes, done-successes)
+				label, done, len(nodes), active, successes, done-successes)
 			fmt.Fprintf(stdout, "\\x1b[%dA", boolInt(terminalRowsDrawn)*(concurrency+1))
 			fmt.Fprintf(stdout, "\\r\\x1b[2K%s\\n", truncateDisplay(header, terminalWidth-1))
 			for i, status := range statuses {
@@ -972,27 +978,6 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 		fmt.Fprintln(stdout)
 	}
 	return results, callbackErr
-}
-
-func countActiveWorkers(statuses []struct {
-	node   sub.Node
-	detail string
-	active bool
-}) int {
-	active := 0
-	for _, status := range statuses {
-		if status.active {
-			active++
-		}
-	}
-	return active
-}
-
-func boolInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
 }
 
 func formatLiveWorkerStatusLine(label string, worker int, node sub.Node, detail string, terminalWidth int) string {
