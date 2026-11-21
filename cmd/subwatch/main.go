@@ -98,9 +98,9 @@ func runCommand(args []string) error {
 	minUp := fs.Float64("min-upload", -1, "minimum upload rate in decimal Mbps")
 	downBytes := fs.Int64("download-bytes", 0, "download test size")
 	upBytes := fs.Int64("upload-bytes", 0, "upload test size")
-	split := fs.Bool("split-by-protocol", false, "write protocol-specific URI subscription files")
+	fs.Bool("split-by-protocol", false, "deprecated: protocol-specific stage files are always written")
 	lookupIP := fs.Bool("lookup-ip", false, "also collect exit IP metadata during service check")
-	noText := fs.Bool("no-subscription-text", false, "do not write the final URI subscription file")
+	fs.Bool("no-subscription-text", false, "deprecated: URI result files are always written")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -189,13 +189,13 @@ func runCommand(args []string) error {
 		opts.UploadBytes = *upBytes
 	}
 	if visited["split-by-protocol"] {
-		opts.SplitByProtocol = *split
+		fmt.Fprintln(os.Stderr, "warning: --split-by-protocol is deprecated and ignored; stage output is always split by protocol")
 	}
 	if visited["lookup-ip"] {
 		opts.LookupIP = *lookupIP
 	}
 	if visited["no-subscription-text"] {
-		opts.WriteText = !*noText
+		fmt.Fprintln(os.Stderr, "warning: --no-subscription-text is deprecated and ignored; URI result files are always written")
 	}
 
 	reader := bufio.NewReader(os.Stdin)
