@@ -408,10 +408,14 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return
 		}
 		n.SpeedPassed = true
+		speedState := "PASS"
 		if opts.RenameNodes {
 			n.RenameError = renameNodeAfterSpeed(stageCtx, n, opts, down, up)
+			if n.RenameError != "" {
+				speedState += " | rename: " + shortLiveError(n.RenameError)
+			}
 		}
-		live(*n, speedLiveDetail(*n, "PASS"))
+		live(*n, speedLiveDetail(*n, speedState))
 	}, nil)
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
