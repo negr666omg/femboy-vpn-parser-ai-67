@@ -74,15 +74,26 @@ func Interfaces(w io.Writer) error {
 }
 
 type loadedSource struct {
-	Reference string
-	Body      []byte
-	Line      int
-	LoadError error
+	Reference  string
+	Body       []byte
+	Line       int
+	LoadError  error
+	ParseError string
 }
 
-type sourcePassCount struct {
+type sourceQualityStats struct {
 	Reference string
-	Count     int
+	Line int
+	Status string
+	Eligible int
+	Exclusive int
+	Shared int
+	ExclusiveURLPassed int
+	SharedURLPassed int
+	ExclusiveSpeedPassed int
+	SharedSpeedPassed int
+	ExclusiveGemini int
+	SharedGemini int
 }
 
 func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
@@ -291,6 +302,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		invalid += len(invalidLines)
 		invalidConfigs = append(invalidConfigs, invalidLines...)
 		if parseErr != nil {
+			sources[i].ParseError = parseErr.Error()
 			progress.Phase = "parse failed"
 			renderSourceProgress(progress)
 			sourceErrors++
@@ -401,7 +413,6 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
 		return err
 	}
-	sourcePassCounts := countURLPassesBySource(perSourceNodes, urlPassed)
 	fmt.Fprintf(stdout, "URL test complete: %d passed / %d failed. Per-protocol URL lists were updated during testing.\n", len(urlPassed), len(urlResults)-len(urlPassed))
 
 	// Stage 2 begins only after every URL test has completed (global barrier).
@@ -496,7 +507,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
-	printSubscriptionPassSummary(stdout, sources, sourcePassCounts)
+	perSourceEligible := make([][]sub.Node, len(perSourceNodes))
+	for i := range perSourceNodes {
+		perSourceEligible[i] = filterProtocols(perSourceNodes[i], opts.Protocols)
+	}
+	printSubscriptionQualitySummary(stdout, sources, perSourceEligible, urlPassed, speedPassed, finalNodes)
 	fmt.Fprintf(stdout, "Output directory: %s\n", opts.OutDir)
 	if opts.GeminiFile {
 		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speed-test-finished*.txt, gemini.txt and gemini-*.txt (all files contain URI lines)")
@@ -812,51 +827,161 @@ func nodeDedupKey(n sub.Node) string {
 	return string(b)
 }
 
-func countURLPassesBySource(perSourceNodes [][]sub.Node, urlPassed []sub.Node) []int {
-	passedKeys := make(map[string]struct{}, len(urlPassed))
-	for _, node := range urlPassed {
-		passedKeys[nodeDedupKey(node)] = struct{}{}
+func nodeKeySet(nodes []sub.Node) map[string]struct{} {
+	keys := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		keys[nodeDedupKey(node)] = struct{}{}
 	}
-	counts := make([]int, len(perSourceNodes))
-	for sourceIndex, nodes := range perSourceNodes {
-		seen := make(map[string]struct{}, len(nodes))
-		for _, node := range nodes {
+	return keys
+}
+
+func sourceSummaryLabel(source loadedSource) string {
+	label := sourceProgressTitle(source.Reference)
+	if parsed, err := url.Parse(source.Reference); err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+		// Keep the host, but never print URL credentials, paths or subscription tokens.
+		label = parsed.Host
+	} else if !strings.Contains(source.Reference, "://") {
+		label = filepath.Clean(source.Reference)
+	}
+	if source.Line > 0 {
+		return fmt.Sprintf("%s [sources.txt:%d]", label, source.Line)
+	}
+	return label
+}
+
+func sourceStageRate(passed, tested int) string {
+	if tested == 0 {
+		return fmt.Sprintf("%d/0 (n/a)", passed)
+	}
+	return fmt.Sprintf("%d/%d (%.1f%%)", passed, tested, 100*float64(passed)/float64(tested))
+}
+
+// buildSubscriptionSourceStats attributes each globally tested node to every
+// source that contains it, but separates source-exclusive nodes from nodes
+// shared by multiple sources. A shared node is tested only once globally and
+// is never presented as an exclusive contribution of any source.
+func buildSubscriptionSourceStats(
+	sources []loadedSource,
+	perSourceNodes [][]sub.Node,
+	urlPassed, speedPassed, geminiAvailable []sub.Node,
+) ([]sourceQualityStats, int, int, int) {
+	perSourceKeys := make([][]string, len(sources))
+	membership := make(map[string]int)
+	sourceAppearances := 0
+
+	for sourceIndex := range sources {
+		if sourceIndex >= len(perSourceNodes) {
+			continue
+		}
+		seen := make(map[string]struct{}, len(perSourceNodes[sourceIndex]))
+		for _, node := range perSourceNodes[sourceIndex] {
 			key := nodeDedupKey(node)
-			if _, exists := passedKeys[key]; !exists {
-				continue
-			}
-			if _, duplicate := seen[key]; duplicate {
+			if _, exists := seen[key]; exists {
 				continue
 			}
 			seen[key] = struct{}{}
-			counts[sourceIndex]++
+			perSourceKeys[sourceIndex] = append(perSourceKeys[sourceIndex], key)
+			membership[key]++
+			sourceAppearances++
 		}
 	}
-	return counts
+
+	urlKeys := nodeKeySet(urlPassed)
+	speedKeys := nodeKeySet(speedPassed)
+	geminiKeys := nodeKeySet(geminiAvailable)
+	stats := make([]sourceQualityStats, len(sources))
+	sharedUnique := 0
+	for _, count := range membership {
+		if count > 1 {
+			sharedUnique++
+		}
+	}
+
+	for sourceIndex, source := range sources {
+		item := sourceQualityStats{
+			Reference: source.Reference,
+			Line: source.Line,
+			Eligible: len(perSourceKeys[sourceIndex]),
+		}
+		switch {
+		case source.LoadError != nil:
+			item.Status = "load failed"
+		case source.ParseError != "":
+			item.Status = "parse failed"
+		}
+		for _, key := range perSourceKeys[sourceIndex] {
+			shared := membership[key] > 1
+			if shared {
+				item.Shared++
+			} else {
+				item.Exclusive++
+			}
+			_, urlOK := urlKeys[key]
+			_, speedOK := speedKeys[key]
+			_, geminiOK := geminiKeys[key]
+			if shared {
+				if urlOK { item.SharedURLPassed++ }
+				if speedOK { item.SharedSpeedPassed++ }
+				if geminiOK { item.SharedGemini++ }
+			} else {
+				if urlOK { item.ExclusiveURLPassed++ }
+				if speedOK { item.ExclusiveSpeedPassed++ }
+				if geminiOK { item.ExclusiveGemini++ }
+			}
+		}
+		stats[sourceIndex] = item
+	}
+
+	// Rank by independently discovered URL-passed configs, not by popular
+	// configs copied into many subscriptions. Break ties by exclusive pass
+	// rate, then by the number of exclusive configs; preserve source order last.
+	sort.SliceStable(stats, func(i, j int) bool {
+		a, b := stats[i], stats[j]
+		if a.ExclusiveURLPassed != b.ExclusiveURLPassed {
+			return a.ExclusiveURLPassed > b.ExclusiveURLPassed
+		}
+		aRate, bRate := 0.0, 0.0
+		if a.Exclusive > 0 { aRate = float64(a.ExclusiveURLPassed) / float64(a.Exclusive) }
+		if b.Exclusive > 0 { bRate = float64(b.ExclusiveURLPassed) / float64(b.Exclusive) }
+		if aRate != bRate { return aRate > bRate }
+		return a.Exclusive > b.Exclusive
+	})
+	return stats, sourceAppearances, len(membership), sharedUnique
 }
 
-func printSubscriptionPassSummary(w io.Writer, sources []loadedSource, counts []int) {
-	items := make([]sourcePassCount, len(sources))
-	for i, source := range sources {
-		count := 0
-		if i < len(counts) {
-			count = counts[i]
-		}
-		items[i] = sourcePassCount{Reference: source.Reference, Count: count}
+func printSubscriptionQualitySummary(
+	w io.Writer,
+	sources []loadedSource,
+	perSourceNodes [][]sub.Node,
+	urlPassed, speedPassed, geminiAvailable []sub.Node,
+) {
+	stats, sourceAppearances, globallyUnique, sharedUnique := buildSubscriptionSourceStats(
+		sources, perSourceNodes, urlPassed, speedPassed, geminiAvailable,
+	)
+	fmt.Fprintln(w, "\nSubscription source quality (shared configs are shown separately):")
+	fmt.Fprintf(w, "Enabled configs across sources: %d unique source entries -> %d globally unique | %d repeated appearances | %d configs occur in multiple sources\n",
+		sourceAppearances, globallyUnique, sourceAppearances-globallyUnique, sharedUnique,
+	)
+	for rank, item := range stats {
+		label := sourceSummaryLabel(loadedSource{Reference: item.Reference, Line: item.Line})
+		status := ""
+		if item.Status != "" { status = " [" + item.Status + "]" }
+		fmt.Fprintf(w, "%2d. %s%s\n", rank+1, label, status)
+		fmt.Fprintf(w, "    configs: %d enabled unique | %d only here | %d shared\n", item.Eligible, item.Exclusive, item.Shared)
+		fmt.Fprintf(w, "    URL:    only here %s | shared %s\n",
+			sourceStageRate(item.ExclusiveURLPassed, item.Exclusive),
+			sourceStageRate(item.SharedURLPassed, item.Shared),
+		)
+		fmt.Fprintf(w, "    speed:  only here %s | shared %s (of URL-passed)\n",
+			sourceStageRate(item.ExclusiveSpeedPassed, item.ExclusiveURLPassed),
+			sourceStageRate(item.SharedSpeedPassed, item.SharedURLPassed),
+		)
+		fmt.Fprintf(w, "    Gemini: only here %s | shared %s (of speed-passed)\n",
+			sourceStageRate(item.ExclusiveGemini, item.ExclusiveSpeedPassed),
+			sourceStageRate(item.SharedGemini, item.SharedSpeedPassed),
+		)
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].Count > items[j].Count
-	})
-
-	fmt.Fprintln(w, "\nSubscription URL-test results (highest passing count first):")
-	for rank, item := range items {
-		word := "configs"
-		if item.Count == 1 {
-			word = "config"
-		}
-		fmt.Fprintf(w, "%2d. %d URL-passed %s | %s\n", rank+1, item.Count, word, item.Reference)
-	}
-	if len(items) == 0 {
+	if len(stats) == 0 {
 		fmt.Fprintln(w, "  No subscription sources")
 	}
 }

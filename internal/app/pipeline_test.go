@@ -606,48 +606,84 @@ func TestLoadSourcesDoesNotSwallowWholeRunCancellation(t *testing.T) {
 	}
 }
 
-func TestCountURLPassesBySourceDeduplicatesPerSourceAndCreditsSharedNodes(t *testing.T) {
+func TestBuildSubscriptionSourceStatsSeparatesExclusiveAndSharedNodes(t *testing.T) {
+	sources := []loadedSource{
+		{Reference: "https://source-a.example/sub", Line: 1},
+		{Reference: "https://source-b.example/sub", Line: 2},
+	}
 	perSource := [][]sub.Node{
 		{
 			{Key: "node-1"},
-			{Key: "node-2"},
-			{Key: "node-2"}, // duplicate in one source counts once
-			{Key: "node-3"}, // failed URL test
+			{Key: "shared"},
+			{Key: "shared"}, // repeated within one source still counts once
+			{Key: "node-3"},
 		},
 		{
-			{Key: "node-2"}, // shared node counts for both subscriptions
+			{Key: "shared"},
 			{Key: "node-4"},
 		},
 	}
-	passed := []sub.Node{{Key: "node-1"}, {Key: "node-2"}}
-	got := countURLPassesBySource(perSource, passed)
-	if len(got) != 2 || got[0] != 2 || got[1] != 1 {
-		t.Fatalf("unexpected per-source counts: %#v", got)
+	urlPassed := []sub.Node{{Key: "node-1"}, {Key: "shared"}, {Key: "node-4"}}
+	speedPassed := []sub.Node{{Key: "node-1"}, {Key: "shared"}}
+	geminiAvailable := []sub.Node{{Key: "shared"}}
+
+	stats, appearances, globallyUnique, sharedUnique := buildSubscriptionSourceStats(
+		sources, perSource, urlPassed, speedPassed, geminiAvailable,
+	)
+	if appearances != 5 || globallyUnique != 4 || sharedUnique != 1 {
+		t.Fatalf("overlap totals = appearances:%d unique:%d shared:%d, want 5/4/1", appearances, globallyUnique, sharedUnique)
+	}
+	byReference := make(map[string]sourceQualityStats, len(stats))
+	for _, item := range stats {
+		byReference[item.Reference] = item
+	}
+	a := byReference[sources[0].Reference]
+	if a.Eligible != 3 || a.Exclusive != 2 || a.Shared != 1 ||
+		a.ExclusiveURLPassed != 1 || a.SharedURLPassed != 1 ||
+		a.ExclusiveSpeedPassed != 1 || a.SharedSpeedPassed != 1 ||
+		a.ExclusiveGemini != 0 || a.SharedGemini != 1 {
+		t.Fatalf("unexpected source A attribution: %+v", a)
+	}
+	b := byReference[sources[1].Reference]
+	if b.Eligible != 2 || b.Exclusive != 1 || b.Shared != 1 ||
+		b.ExclusiveURLPassed != 1 || b.SharedURLPassed != 1 ||
+		b.ExclusiveSpeedPassed != 0 || b.SharedSpeedPassed != 1 ||
+		b.ExclusiveGemini != 0 || b.SharedGemini != 1 {
+		t.Fatalf("unexpected source B attribution: %+v", b)
 	}
 }
 
-func TestPrintSubscriptionPassSummarySortsDescendingAndKeepsStableTies(t *testing.T) {
+func TestPrintSubscriptionQualitySummaryRanksByExclusiveResultsAndRedactsURLSecrets(t *testing.T) {
 	sources := []loadedSource{
-		{Reference: "https://source-a.example/sub"},
-		{Reference: "https://source-b.example/sub"},
-		{Reference: "https://source-c.example/sub"},
+		{Reference: "https://user:secret@source-a.example/sub?token=hidden", Line: 1},
+		{Reference: "https://source-b.example/sub?token=also-hidden", Line: 2},
 	}
-	counts := []int{2, 5, 5}
+	perSource := [][]sub.Node{
+		{{Key: "a-only"}, {Key: "shared"}},
+		{{Key: "b-only-1"}, {Key: "b-only-2"}, {Key: "shared"}},
+	}
+	urlPassed := []sub.Node{{Key: "a-only"}, {Key: "b-only-1"}, {Key: "b-only-2"}, {Key: "shared"}}
 	var output bytes.Buffer
-	printSubscriptionPassSummary(&output, sources, counts)
+	printSubscriptionQualitySummary(&output, sources, perSource, urlPassed, nil, nil)
 	got := output.String()
-	wantOrder := []string{
-		"1. 5 URL-passed configs | https://source-b.example/sub",
-		"2. 5 URL-passed configs | https://source-c.example/sub",
-		"3. 2 URL-passed configs | https://source-a.example/sub",
+	first := strings.Index(got, "1. source-b.example [sources.txt:2]")
+	second := strings.Index(got, "2. source-a.example [sources.txt:1]")
+	if first < 0 || second <= first {
+		t.Fatalf("sources should rank by exclusive URL-passed configs, not copied shared configs:\n%s", got)
 	}
-	last := -1
-	for _, item := range wantOrder {
-		index := strings.Index(got, item)
-		if index < 0 || index <= last {
-			t.Fatalf("output is not sorted/stable; missing or misplaced %q in:\n%s", item, got)
+	for _, secret := range []string{"user:secret", "token=hidden", "also-hidden"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("summary leaked subscription URL secret %q:\n%s", secret, got)
 		}
-		last = index
+	}
+	for _, want := range []string{
+		"5 unique source entries -> 4 globally unique",
+		"configs: 3 enabled unique | 2 only here | 1 shared",
+		"URL:    only here 2/2 (100.0%) | shared 1/1 (100.0%)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary missing %q:\n%s", want, got)
+		}
 	}
 }
 
