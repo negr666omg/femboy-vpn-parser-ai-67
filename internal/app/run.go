@@ -276,7 +276,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		progress.Phase = "parsed"
 		progress.LinesProcessed = progress.TotalLines
 		progress.Nodes = len(nodes)
-		progress.Invalid = bad
+		progress.Invalid = len(invalidLines)
 		renderSourceProgress(progress)
 	}
 	if sourceProgressRendered {
