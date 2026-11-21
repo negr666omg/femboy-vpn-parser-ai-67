@@ -21,6 +21,7 @@ type NetworkNamespace struct {
 	Name       string
 	ProxyIP    string
 	hostVeth   string
+	macvlan    string
 	dhcpPID    string
 	dhcpLease  string
 	resolvDir  string
@@ -76,21 +77,39 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	if err := run("ip", "-n", ns.Name, "addr", "add", "10.254.0.2/30", "dev", peer); err != nil { return fail(err) }
 	if err := run("ip", "-n", ns.Name, "link", "set", peer, "up"); err != nil { return fail(err) }
 
-	macvlan := fmt.Sprintf("swm%d", os.Getpid()%1000000)
-	if err := run("ip", "link", "add", "link", iface, "name", macvlan, "type", "macvlan", "mode", "bridge"); err != nil {
+	ns.macvlan = fmt.Sprintf("swm%d", os.Getpid()%1000000)
+	if err := run("ip", "link", "add", "link", iface, "name", ns.macvlan, "type", "macvlan", "mode", "bridge"); err != nil {
 		return fail(fmt.Errorf("cannot create isolated link on %s (the network adapter or Wi-Fi may not support an additional MAC address): %w", iface, err))
 	}
-	if err := run("ip", "link", "set", macvlan, "netns", ns.Name); err != nil { return fail(err) }
-	if err := run("ip", "-n", ns.Name, "link", "set", macvlan, "up"); err != nil { return fail(err) }
-	if err := run("ip", "netns", "exec", ns.Name, "dhclient", "-4", "-1", "-v", "-pf", ns.dhcpPID, "-lf", ns.dhcpLease, macvlan); err != nil {
+	if err := run("ip", "link", "set", ns.macvlan, "netns", ns.Name); err != nil { return fail(fmt.Errorf("move isolated interface into namespace: %w", err)) }
+	if err := run("ip", "-n", ns.Name, "link", "set", ns.macvlan, "up"); err != nil { return fail(err) }
+	if err := run("ip", "netns", "exec", ns.Name, "dhclient", "-4", "-1", "-v", "-pf", ns.dhcpPID, "-lf", ns.dhcpLease, ns.macvlan); err != nil {
 		return fail(fmt.Errorf("DHCP did not obtain an address through %s; check that the network permits a second device/MAC: %w", iface, err))
 	}
 	route, err := ns.output(ctx, "ip", "-n", ns.Name, "route", "show", "default")
-	if err != nil || !strings.Contains(route, "default") {
-		return fail(fmt.Errorf("selected interface %s did not provide a default route in the isolated network", iface))
+	if err != nil {
+		return fail(fmt.Errorf("inspect isolated default route: %w", err))
+	}
+	if !defaultRouteUsesInterface(route, ns.macvlan) {
+		return fail(fmt.Errorf("selected interface %s did not provide the isolated default route (expected dev %s, got %q)", iface, ns.macvlan, strings.TrimSpace(route)))
 	}
 	fmt.Fprintf(output, "[network] isolated Linux namespace %s is online via %s (%s)\n", ns.Name, iface, strings.TrimSpace(route))
 	return ns, nil
+}
+
+func defaultRouteUsesInterface(routes, iface string) bool {
+	for _, line := range strings.Split(routes, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "default" {
+			continue
+		}
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "dev" && fields[i+1] == iface {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (n *NetworkNamespace) root(ctx context.Context, args ...string) error {
@@ -107,8 +126,7 @@ func (n *NetworkNamespace) output(ctx context.Context, args ...string) (string, 
 	return string(out), nil
 }
 
-// Command creates a sing-box command inside the namespace, dropping root
-// privileges before executing the downloaded proxy binary.
+// Command runs a process inside the namespace as the invoking user.
 func (n *NetworkNamespace) Command(ctx context.Context, binary string, args ...string) *exec.Cmd {
 	uid, gid := strconv.Itoa(os.Getuid()), strconv.Itoa(os.Getgid())
 	command := []string{"-n", "ip", "netns", "exec", n.Name, "setpriv", "--reuid", uid, "--regid", gid, "--init-groups", binary}
@@ -120,8 +138,14 @@ func (n *NetworkNamespace) Close() {
 	if n == nil { return }
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// Release the DHCP lease while the namespace still exists.
+	// Release the DHCP lease first, then remove the macvlan wherever it ended up.
 	_ = n.root(ctx, "ip", "netns", "exec", n.Name, "dhclient", "-r", "-pf", n.dhcpPID)
+	if n.macvlan != "" {
+		// The first deletion handles a successfully moved link; the second
+		// handles the partial-setup case where moving it into the namespace failed.
+		_ = n.root(ctx, "ip", "-n", n.Name, "link", "del", n.macvlan)
+		_ = n.root(ctx, "ip", "link", "del", n.macvlan)
+	}
 	_ = n.root(ctx, "ip", "netns", "del", n.Name)
 	_ = n.root(ctx, "ip", "link", "del", n.hostVeth)
 	_ = n.root(ctx, "rm", "-f", n.dhcpPID, n.dhcpLease)
