@@ -37,6 +37,12 @@ type Node struct {
 }
 
 func ParseDocument(body []byte) ([]Node, int, error) {
+	return ParseDocumentWithProgress(body, nil)
+}
+
+// ParseDocumentWithProgress parses a subscription and periodically reports
+// line-level progress. The callback runs synchronously in the parser goroutine.
+func ParseDocumentWithProgress(body []byte, progress func(processedLines, totalLines, parsedNodes, invalidLines int)) ([]Node, int, error) {
 	if len(body) > 8<<20 {
 		return nil, 0, errors.New("source exceeds 8 MiB")
 	}
@@ -52,22 +58,30 @@ func ParseDocument(body []byte) ([]Node, int, error) {
 	}
 	var nodes []Node
 	invalid := 0
+	totalLines := strings.Count(text, "\n") + 1
+	if progress != nil {
+		progress(0, totalLines, 0, 0)
+	}
 	scanner := bufio.NewScanner(strings.NewReader(text))
 	scanner.Buffer(make([]byte, 64*1024), 2<<20)
+	processedLines := 0
 	for scanner.Scan() {
+		processedLines++
 		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+		if line != "" && !strings.HasPrefix(line, "#") && !(strings.Contains(line, ",") && !strings.Contains(line, "://")) {
+			node, err := ParseURI(line)
+			if err != nil {
+				invalid++
+			} else {
+				nodes = append(nodes, node)
+			}
 		}
-		if strings.Contains(line, ",") && !strings.Contains(line, "://") {
-			continue
+		if progress != nil && processedLines%128 == 0 {
+			progress(processedLines, totalLines, len(nodes), invalid)
 		}
-		node, err := ParseURI(line)
-		if err != nil {
-			invalid++
-			continue
-		}
-		nodes = append(nodes, node)
+	}
+	if progress != nil && processedLines%128 != 0 {
+		progress(processedLines, totalLines, len(nodes), invalid)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, invalid, err
