@@ -1400,7 +1400,7 @@ func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub
 				// In after_result mode, publish the new server only after its
 				// test has returned a definitive pass/fail result. Until then
 				// this worker row keeps the previous server's complete line.
-				if optsLiveDisplayModeDeferred(mouseArgs, label) {
+				if deferredDisplay {
 					statuses[workerID].node = results[i]
 					statuses[workerID].detail = stageResultDetail(label, results[i])
 					render()
@@ -1513,10 +1513,9 @@ func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
 	return fmt.Sprintf("download: %.0f Mbps | upload: %.0f Mbps | %s", downloadMbps, uploadMbps, state)
 }
 
-// formatLiveStatusLine keeps ping as a fixed right-hand field. The progress
-// counters remain first; the config name and stage details share the remaining
-// width and are shortened as needed. One terminal column is reserved to avoid
-// accidental auto-wrap at the right margin.
+// formatLiveStatusLine keeps the current server's own ping at the far right.
+// The config name and result detail share the remaining width. One terminal
+// column is reserved to avoid accidental auto-wrap at the right margin.
 func formatLiveStatusLine(label string, done, total, passed int, node sub.Node, detail string, terminalWidth int) string {
 	head := fmt.Sprintf("[%s] %d/%d | passed: %d | failed: %d", label, done, total, passed, done-passed)
 	return formatLiveStatusParts(head, liveNodeTitle(node), detail, livePingText(node), terminalWidth)
