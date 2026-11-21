@@ -191,13 +191,6 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := os.Chmod(opts.OutDir, 0700); err != nil {
 		return err
 	}
-	// Keep the output directory focused on generated result files, including invalid input lines.
-	// Intermediate selections, failed lists, CSV diagnostics and obsolete files
-	// are deliberately not exported.
-	if err := cleanOutputArtifacts(opts.OutDir); err != nil {
-		return fmt.Errorf("clean output directory: %w", err)
-	}
-
 	// When explicitly enabled, create the namespace before loading remote source
 	// URLs. The source list and local files remain host filesystem operations;
 	// only HTTP(S) subscription downloads are executed inside this namespace.
@@ -321,6 +314,12 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
+	}
+	// Preserve the previous successful output if setup or source loading failed.
+	// Once the current sources have been parsed, remove stale generated files
+	// immediately before writing this run's results.
+	if err := cleanOutputArtifacts(opts.OutDir); err != nil {
+		return fmt.Errorf("clean output directory: %w", err)
 	}
 	if err := writeInvalidLines(filepath.Join(opts.OutDir, "invalid.txt"), invalidConfigs); err != nil {
 		return fmt.Errorf("write invalid configs: %w", err)
