@@ -37,6 +37,9 @@
     "geoip_url": "https://ipwho.is/",
     "name_format": "{flag} {country} {download}↓{upload}↑"
   },
+  "live_display": {
+    "mode": "after_result"
+  },
   "output": {
     "directory": "out",
     "gemini_file": true
