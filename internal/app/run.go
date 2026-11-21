@@ -68,11 +68,93 @@ func Interfaces(w io.Writer) error {
 }
 
 type loadedSource struct {
-	Reference  string
-	Body       []byte
-	Line       int
-	LoadError  error
-	ParseError string
+	Reference                 string
+	Body                      []byte
+	Line                      int
+	LoadError                 error
+	ParseError                string
+	TransientConnectionError  bool
+}
+
+type retryableConnectionError struct {
+	stage string
+	err   error
+}
+
+func (e *retryableConnectionError) Error() string {
+	return e.stage + ": " + e.err.Error()
+}
+
+func (e *retryableConnectionError) Unwrap() error { return e.err }
+
+// IsRetryableConnectionError reports whether an error came from an operation
+// that can succeed after connectivity is restored. It deliberately excludes
+// invalid configuration, local file, permission and authentication errors.
+func IsRetryableConnectionError(err error) bool {
+	var target *retryableConnectionError
+	return errors.As(err, &target)
+}
+
+func newRetryableConnectionError(stage string, err error) error {
+	return &retryableConnectionError{stage: stage, err: err}
+}
+
+func isTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary()) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && (dnsErr.IsTimeout || dnsErr.IsTemporary) {
+		return true
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.ECONNREFUSED, syscall.ECONNRESET, syscall.ETIMEDOUT,
+			syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.ENETDOWN, syscall.EPIPE:
+			return true
+		}
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"i/o timeout", "timed out", "timeout", "deadline exceeded",
+		"connection refused", "connection reset", "connection aborted",
+		"connection closed by remote host", "connection lost", "broken pipe",
+		"network is unreachable", "network is down", "no route to host",
+		"host is down", "temporary failure in name resolution",
+		"could not resolve hostname", "no such host", "no dhcpoffers received",
+		"no dhcp offers", "service unavailable", "bad gateway", "gateway timeout",
+		"http 408", "http 425", "http 429", "http 500", "http 502",
+		"http 503", "http 504",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func allSourcesFailedWithTransientConnections(sources []loadedSource) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	for _, source := range sources {
+		u, err := url.Parse(strings.TrimSpace(source.Reference))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return false
+		}
+		if source.LoadError == nil || !source.TransientConnectionError {
+			return false
+		}
+	}
+	return true
 }
 
 type sourceQualityStats struct {
@@ -317,6 +399,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
 		if nsErr != nil {
+			if opts.RetryOnConnectionError && isTransientNetworkError(nsErr) {
+				return newRetryableConnectionError("prepare isolated source network", nsErr)
+			}
 			return fmt.Errorf("prepare isolated source network: %w", nsErr)
 		}
 		if ns == nil {
@@ -498,7 +583,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(parsed) == 0 {
-		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
+		err := fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
+		if opts.RetryOnConnectionError && allSourcesFailedWithTransientConnections(sources) {
+			return newRetryableConnectionError("all remote subscription sources are temporarily unreachable", err)
+		}
+		return err
 	}
 	fmt.Fprintf(stdout, "Parsed: %d | invalid: %d | source errors: %d | metadata lines: %d\n", len(parsed), invalid, sourceErrors, len(metadata))
 
@@ -520,13 +609,21 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	fmt.Fprintln(stdout, "[prepare] Checking sing-box; first run may download the verified core...")
 	corePath, err := core.FindOrDownloadProgressContext(ctx, opts.CorePath, stdout)
 	if err != nil {
+		if opts.RetryOnConnectionError && isTransientNetworkError(err) {
+			return newRetryableConnectionError("download sing-box", err)
+		}
 		return fmt.Errorf("sing-box: %w", err)
 	}
 	opts.CorePath = corePath
 	fmt.Fprintf(stdout, "[prepare] sing-box ready: %s\n", corePath)
 	if opts.Interface != "auto" && opts.NetworkNamespace == "" {
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
-		if nsErr != nil { return fmt.Errorf("prepare isolated network: %w", nsErr) }
+		if nsErr != nil {
+			if opts.RetryOnConnectionError && isTransientNetworkError(nsErr) {
+				return newRetryableConnectionError("prepare isolated network", nsErr)
+			}
+			return fmt.Errorf("prepare isolated network: %w", nsErr)
+		}
 		if ns != nil {
 			defer ns.Close()
 			opts.NetworkNamespace = ns.Name
@@ -887,6 +984,7 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 						return sources, ctx.Err()
 					}
 					source.LoadError = fmt.Errorf("download failed: %w", fetchErr)
+					source.TransientConnectionError = isTransientNetworkError(fetchErr)
 				} else {
 					source.Body = body
 				}
