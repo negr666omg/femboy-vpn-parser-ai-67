@@ -40,6 +40,9 @@
   "live_display": {
     "mode": "after_result"
   },
+  "stability": {
+    "max_ping_ms": 100
+  },
   "output": {
     "directory": "out",
     "gemini_file": true
