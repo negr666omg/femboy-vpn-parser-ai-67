@@ -1125,6 +1125,40 @@ func TestURLLiveDetailReportsRenameFailureSeparately(t *testing.T) {
 	}
 }
 
+func TestRunPreservesPreviousResultsWhenSourceListCannotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	outDir := filepath.Join(dir, "out")
+	if err := os.MkdirAll(outDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	previous := map[string]string{
+		"all.txt": "previous successful result\n",
+		"url-test-finished.txt": "previous passing nodes\n",
+	}
+	for name, content := range previous {
+		if err := os.WriteFile(filepath.Join(outDir, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	opts := DefaultOptions()
+	opts.Sources = filepath.Join(dir, "missing-sources.txt")
+	opts.OutDir = outDir
+	err := Run(context.Background(), opts, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected missing source list error")
+	}
+	for name, want := range previous {
+		got, readErr := os.ReadFile(filepath.Join(outDir, name))
+		if readErr != nil {
+			t.Fatalf("previous result %s was removed: %v", name, readErr)
+		}
+		if string(got) != want {
+			t.Fatalf("previous result %s changed: got %q want %q", name, got, want)
+		}
+	}
+}
+
 func TestInitNeverOverwritesExistingFiles(t *testing.T) {
 	dir := t.TempDir()
 	existing := map[string]string{
