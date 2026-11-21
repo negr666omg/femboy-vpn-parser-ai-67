@@ -892,6 +892,73 @@ func sourceProgressTitle(reference string) string {
 	return base
 }
 
+func truncateDisplayMiddle(value string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if displayWidth(value) <= maxWidth {
+		return value
+	}
+	if maxWidth == 1 {
+		return "…"
+	}
+
+	// Keep more of the beginning so a long source URL still exposes its host,
+	// while retaining its suffix and the separate progress/status field.
+	available := maxWidth - 1
+	prefixBudget := available * 3 / 4
+	suffixBudget := available - prefixBudget
+	runes := []rune(value)
+
+	var prefix strings.Builder
+	used := 0
+	for i := 0; i < len(runes); i++ {
+		width := runeCellWidth(runes[i])
+		if isRegionalIndicator(runes[i]) && i+1 < len(runes) && isRegionalIndicator(runes[i+1]) {
+			width = 2
+			if used+width > prefixBudget {
+				break
+			}
+			prefix.WriteRune(runes[i])
+			prefix.WriteRune(runes[i+1])
+			used += width
+			i++
+			continue
+		}
+		if used+width > prefixBudget {
+			break
+		}
+		prefix.WriteRune(runes[i])
+		used += width
+	}
+
+	var suffixRunes []rune
+	used = 0
+	for i := len(runes) - 1; i >= 0; i-- {
+		width := runeCellWidth(runes[i])
+		if isRegionalIndicator(runes[i]) && i > 0 && isRegionalIndicator(runes[i-1]) {
+			width = 2
+			if used+width > suffixBudget {
+				break
+			}
+			suffixRunes = append(suffixRunes, runes[i-1], runes[i])
+			used += width
+			i--
+			continue
+		}
+		if used+width > suffixBudget {
+			break
+		}
+		suffixRunes = append(suffixRunes, runes[i])
+		used += width
+	}
+	var suffix strings.Builder
+	for i := len(suffixRunes) - 1; i >= 0; i-- {
+		suffix.WriteRune(suffixRunes[i])
+	}
+	return prefix.String() + "…" + suffix.String()
+}
+
 func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string {
 	identity := cleanLiveText(sourceProgressTitle(progress.Reference))
 	head := "[PARSE]"
@@ -912,7 +979,11 @@ func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string
 		if limit < 1 {
 			limit = 1
 		}
-		return truncateDisplay(line, limit)
+		identityBudget := limit - displayWidth(head) - displayWidth(detail) - 6
+		if identityBudget < 1 {
+			return truncateDisplay(line, limit)
+		}
+		return head + " | " + truncateDisplayMiddle(identity, identityBudget) + " | " + detail
 	}
 	return line
 }
