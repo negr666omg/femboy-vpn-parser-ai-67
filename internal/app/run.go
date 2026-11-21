@@ -175,10 +175,10 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		sourceNamespace = ns
 		opts.NetworkNamespace = ns.Name
 		defer sourceNamespace.Close()
-		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\\n", opts.Interface)
+		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
 	}
 
-	fmt.Fprintf(stdout, "[1/4] PARSE: reading %s\\n", opts.Sources)
+	fmt.Fprintf(stdout, "[1/4] PARSE: reading %s\n", opts.Sources)
 	var sources []loadedSource
 	var err error
 	if sourceNamespace != nil {
@@ -186,7 +186,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		if exeErr != nil {
 			return fmt.Errorf("locate SubWatch executable for isolated source downloads: %w", exeErr)
 		}
-		sources, err = loadSourcesWithFetcher(ctx, opts.Sources, sourceDownloadTimeout, func(fetchCtx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+		sources, err = loadSourcesWithFetcher(ctx, opts.Sources, sourceDownloadTimeout, func(fetchCtx context.Context, sourceURL string, _ time.Duration) ([]byte, error) {
 			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL)
 		})
 	} else {
