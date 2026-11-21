@@ -27,7 +27,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
   "speed_test":{"concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
   "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json","name_format":"{flag} {download}↓{upload}↑","speed_decimals":2},
   "final_check":{"enabled":false,"concurrency":1,"timeout":"8s"},
-  "output":{"directory":"results","split_by_protocol":true,"subscription_text":false}
+  "output":{"directory":"results","split_by_protocol":true,"subscription_text":false,"gemini_file":false}
 }`
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
 		t.Fatalf("protocol aliases not normalized: %#v", opts.Protocols)
 	}
-	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText {
+	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText || opts.GeminiFile {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
 	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
@@ -75,6 +75,12 @@ func TestSourceTimeoutMustBePositive(t *testing.T) {
 func TestDefaultSourceTimeout(t *testing.T) {
 	if got := DefaultOptions().SourceTimeout; got != 30*time.Second {
 		t.Fatalf("default source timeout = %s, want 30s", got)
+	}
+}
+
+func TestDefaultGeminiFileEnabled(t *testing.T) {
+	if !DefaultOptions().GeminiFile {
+		t.Fatal("separate Gemini output should remain enabled by default")
 	}
 }
 
@@ -289,32 +295,112 @@ func TestFinalCheckStageRemoved(t *testing.T) {
 	}
 }
 
-func TestWorkingProtocolFilesContainOnlyURLPassedNodes(t *testing.T) {
+func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 	dir := t.TempDir()
-	nodes := []sub.Node{
-		{Protocol: "vless", URI: "vless://passed-one"},
-		{Protocol: "vless", URI: "vless://passed-two"},
-		{Protocol: "ss", URI: "ss://passed"},
+	urlNodes := []sub.Node{
+		{Protocol: "vless", URI: "vless://url-one"},
+		{Protocol: "ss", URI: "ss://url-two"},
 	}
-	if err := writeWorkingProtocolFiles(dir, nodes); err != nil {
-		t.Fatal(err)
+	speedNodes := []sub.Node{{Protocol: "vless", URI: "vless://speed-one"}}
+	geminiNodes := []sub.Node{{Protocol: "ss", URI: "ss://gemini-one"}}
+	for _, item := range []struct {
+		base  string
+		nodes []sub.Node
+	}{
+		{"url-test-finished", urlNodes},
+		{"speed-test-finished", speedNodes},
+		{"gemini", geminiNodes},
+	} {
+		if err := writeStageFiles(dir, item.base, item.nodes, true); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for name, want := range map[string]string{
-		"vless.txt": "vless://passed-one\nvless://passed-two\n",
-		"ss.txt":    "ss://passed\n",
+		"url-test-finished-vless.txt": "vless://url-one\n",
+		"url-test-finished-ss.txt": "ss://url-two\n",
+		"speed-test-finished.txt": "vless://speed-one\n",
+		"speed-test-finished-vless.txt": "vless://speed-one\n",
+		"gemini.txt": "ss://gemini-one\n",
+		"gemini-ss.txt": "ss://gemini-one\n",
 	} {
 		got, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil || string(got) != want {
 			t.Fatalf("%s: got %q, err %v", name, got, err)
 		}
 	}
-	// An empty protocol group must not leave a stale subscription behind.
-	if err := writeWorkingProtocolFiles(dir, []sub.Node{{Protocol: "ss", URI: "ss://only"}}); err != nil {
+	for _, legacy := range []string{"vless.txt", "ss.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, legacy)); !os.IsNotExist(err) {
+			t.Fatalf("legacy unqualified protocol file %s exists: %v", legacy, err)
+		}
+	}
+	if err := writeStageFiles(dir, "url-test-finished", []sub.Node{{Protocol: "ss", URI: "ss://only"}}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "vless.txt")); !os.IsNotExist(err) {
-		t.Fatalf("stale vless list remains: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "url-test-finished-vless.txt")); !os.IsNotExist(err) {
+		t.Fatal("stale URL protocol list remains")
 	}
+}
+
+func TestGeminiFileToggleSeparatesGeminiSubscriptions(t *testing.T) {
+	dir := t.TempDir()
+	parsed := []sub.Node{{Key: "same", Protocol: "vless", Name: "old", URI: "vless://node#old"}}
+	urlNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "old", URI: "vless://node#old", URLPassed: true}}
+	speedNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true}}
+	geminiNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true, GeminiStatus: "available"}}
+	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeStageFiles(dir, "speed-test-finished", speedNodes, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeminiResults(dir, geminiNodes, parsed, urlNodes, speedNodes, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gemini.txt", "gemini-vless.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("expected separate Gemini file %s: %v", name, err)
+		}
+	}
+	if !strings.Contains(geminiNodes[0].URI, "#fast") {
+		t.Fatal("separate Gemini mode unexpectedly renamed node")
+	}
+	if strings.Contains(string(mustRead(t, filepath.Join(dir, "url-test-finished.txt"))), "Gemini") {
+		t.Fatal("separate Gemini mode modified earlier stage files")
+	}
+}
+
+func TestGeminiDisabledMarksNodesInEveryApplicableFile(t *testing.T) {
+	dir := t.TempDir()
+	parsed := []sub.Node{{Key: "same", Protocol: "vless", Name: "old", URI: "vless://node#old"}}
+	urlNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "old", URI: "vless://node#old", URLPassed: true}}
+	speedNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true}}
+	geminiNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true, GeminiStatus: "available"}}
+	if err := writeGeminiResults(dir, geminiNodes, parsed, urlNodes, speedNodes, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"all.txt", "url-test-finished.txt", "url-test-finished-vless.txt", "speed-test-finished.txt", "speed-test-finished-vless.txt"} {
+		data := string(mustRead(t, filepath.Join(dir, name)))
+		if !strings.Contains(data, "Gemini") {
+			t.Fatalf("%s did not receive Gemini marker: %q", name, data)
+		}
+	}
+	if !strings.HasSuffix(geminiNodes[0].Name, geminiNameSuffix) {
+		t.Fatalf("unexpected marked name: %q", geminiNodes[0].Name)
+	}
+	for _, name := range []string{"gemini.txt", "gemini-vless.txt", "gemini-available.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("separate Gemini output %s should be absent: %v", name, err)
+		}
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return data
 }
 
 func TestRunStageCallbackRunsForEachCompletedNode(t *testing.T) {
@@ -337,7 +423,7 @@ func TestRunStageCallbackRunsForEachCompletedNode(t *testing.T) {
 
 func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt"} {
+	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -345,7 +431,7 @@ func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	if err := cleanOutputArtifacts(dir); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt"} {
+	for _, name := range []string{"all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("generated artifact %s remains: %v", name, err)
 		}

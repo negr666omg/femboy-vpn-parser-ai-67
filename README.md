@@ -29,9 +29,9 @@ When `config.json` does not exist, `sw run` creates it automatically with editab
 
 1. Parse every source and write `all.txt` (all parsed proxy URIs, including duplicates).
 2. Deduplicate in memory and apply the enabled-protocol filter. These are internal working sets and are not exported.
-3. URL-test every selected unique node. As soon as a node passes, SubWatch atomically updates `url-test-finished.txt` and the corresponding protocol file (`vless.txt`, `ss.txt`, `hysteria2.txt`, etc.). Protocol files therefore contain only URL-test-passed nodes and grow during the URL-test stage; they are never prefilled with untested nodes.
-4. After the complete URL-test barrier, speed-test only URL successes. Both download and upload must meet their configured minimums. Write `speedtest-finished.txt`.
-5. After the complete speed-test barrier, check Gemini only for speed-test successes. Write `gemini-available.txt` with only nodes classified as `available`.
+3. URL-test every selected unique node. As soon as a node passes, SubWatch atomically updates `url-test-finished.txt` and the matching protocol file (for example, `url-test-finished-vless.txt`). These files contain only URL-test-passed nodes and grow during the URL-test stage.
+4. After the complete URL-test barrier, speed-test only URL successes. Both download and upload must meet their configured minimums. Write `speed-test-finished.txt` and per-protocol files such as `speed-test-finished-vless.txt`.
+5. After the complete speed-test barrier, check Gemini only for speed-test successes. With `output.gemini_file: true`, write `gemini.txt` and matching protocol files such as `gemini-vless.txt`, containing only nodes classified as `available`. With the setting disabled, do not create separate Gemini files; instead append `Gemini 🐱` to each available node's remark in `all.txt`, `url-test-finished*.txt` and `speed-test-finished*.txt`, including their protocol-specific lists.
 6. At the end of the run, print each source subscription and how many unique URL-passed nodes it contributed, sorted from highest count to lowest. If a passing node occurs in multiple sources, it is credited to each of those sources while being tested only once globally.
 
 All output lists are plain-text URI subscriptions, one URI per line. Failed-stage lists, temporary `selected`/`unique` lists, duplicate `tested` lists, service diagnostics and CSV reports are not exported. The output directory is cleaned of SubWatch-generated artifacts at the start of each run so stale files from older versions do not remain. Each invocation still performs one pass only; continuous/infinite cycling is not enabled.
@@ -52,7 +52,8 @@ See [`config.example.json`](./config.example.json). All settings are optional; d
 - `url_test`: URL used for the reachability check, concurrency, and timeout.
 - `speed_test`: separate concurrency and overall timeout, first-byte timeout, maximum measurement duration after the first byte (per direction), sampling interval, independent download/upload Mbps thresholds, payload sizes, and custom HTTP URLs. The reported speed is the **fastest observed sample interval**, not the average across the full transfer. The download URL may contain `{bytes}`; the upload URL must accept a raw HTTP `POST` body and return 2xx.
 - `service_check`: concurrency, timeout, optional exit-IP lookup, automatic node renaming, GeoIP endpoint, name template (`{flag}`, `{download}`, `{upload}`), and Mbps decimal precision. By default, speed-passed nodes are renamed in their exported URI remark, for example `🇩🇪 70↓34↑`; GeoIP is requested through the tested proxy.
-- `output`: output directory. The five result groups are always written as URI-only `.txt` files; protocol-specific working lists are always enabled.
+- `output.directory`: output directory. Stage result files are always plain URI-only `.txt` files and are split by protocol, for example `url-test-finished-vless.txt`, `speed-test-finished-vless.txt` and `gemini-vless.txt`.
+- `output.gemini_file`: when `true` (default), create a separate `gemini.txt` plus `gemini-<protocol>.txt` lists. When `false`, do not create a Gemini-only file; instead rename Gemini-available nodes by appending `Gemini 🐱` to their remark and refresh all earlier files in which those nodes appear, including `all.txt` and both stage/protocol lists.
 
 The default speed test uses 2 MiB download and 2 MiB upload payloads, a concurrency of 2, and minimums of 8 Mbps in both directions. **8 Mbps is approximately 1 MB/s.** Speed-test concurrency is deliberately lower than URL-test concurrency because simultaneous throughput tests share the machine's internet connection and can reduce measured rates. Set it to `1` for the least contention or increase it when throughput is ample.
 
@@ -74,10 +75,9 @@ For compatibility, an old `config.json` containing a `final_check` object is acc
 The output directory contains only these result groups:
 
 - `all.txt` — every parsed proxy URI from all sources (duplicates included).
-- `vless.txt`, `vmess.txt`, `trojan.txt`, `ss.txt`, `hysteria2.txt`, `tuic.txt`, `socks.txt`, `http.txt` — only nodes that passed URL-test, grouped by protocol. A protocol file appears only when it has at least one passing node and is updated as URL tests finish.
-- `url-test-finished.txt` — all URL-test-passed nodes.
-- `speedtest-finished.txt` — nodes that passed both download and upload thresholds.
-- `gemini-available.txt` — nodes classified as Gemini `available`.
+- `url-test-finished.txt` and `url-test-finished-<protocol>.txt` — all URL-test-passed nodes and their per-protocol subsets.
+- `speed-test-finished.txt` and `speed-test-finished-<protocol>.txt` — nodes that passed both download and upload thresholds and their per-protocol subsets.
+- `gemini.txt` and `gemini-<protocol>.txt` — nodes classified as Gemini `available`, created when `output.gemini_file` is `true`. When it is `false`, Gemini availability is marked in the node name across all applicable earlier files instead.
 
 `selected` means the internal list after deduplication and filtering by `protocols.enabled`; it does not mean URL-test-passed or working. It is an intermediate implementation detail and is no longer written to disk. Failed lists, `unique.txt`, `tested.txt`, `final.txt`, service-check dumps and `report.csv` are intentionally omitted to keep the output directory minimal.
 

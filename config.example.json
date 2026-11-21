@@ -39,7 +39,8 @@
   "output": {
     "directory": "out",
     "split_by_protocol": true,
-    "subscription_text": true
+    "subscription_text": true,
+    "gemini_file": true
   },
   "remote_upload": {
     "enabled": false,

@@ -336,17 +336,17 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		urlFilesMu.Lock()
 		defer urlFilesMu.Unlock()
 		urlPassedLive = append(urlPassedLive, completed)
-		if err := writeSubscription(filepath.Join(opts.OutDir, "url-test-finished.txt"), urlPassedLive); err != nil {
-			return err
-		}
-		return writeWorkingProtocolFiles(opts.OutDir, urlPassedLive)
+		return writeStageFiles(opts.OutDir, "url-test-finished", urlPassedLive, true)
 	})
 	if stageErr != nil {
 		return stageErr
 	}
 	urlPassed := filterNodes(urlResults, func(n sub.Node) bool { return n.URLPassed })
+	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+		return err
+	}
 	sourcePassCounts := countURLPassesBySource(perSourceNodes, urlPassed)
-	fmt.Fprintf(stdout, "URL test complete: %d passed / %d failed. Protocol subscriptions were updated during testing.\n", len(urlPassed), len(urlResults)-len(urlPassed))
+	fmt.Fprintf(stdout, "URL test complete: %d passed / %d failed. Per-protocol URL lists were updated during testing.\n", len(urlPassed), len(urlResults)-len(urlPassed))
 
 	// Stage 2 begins only after every URL test has completed (global barrier).
 	// urlPassed remains the authoritative in-memory result set.
@@ -385,7 +385,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}, nil)
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
-	if err := writeSubscription(filepath.Join(opts.OutDir, "speedtest-finished.txt"), speedPassed); err != nil {
+	if err := writeStageFiles(opts.OutDir, "speed-test-finished", speedPassed, true); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Speed test complete: %d passed / %d failed.\n", len(speedPassed), len(speedFailed))
@@ -417,14 +417,18 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Each node is tested exactly once per enabled stage: URL, speed, then Gemini.
 	// There is deliberately no final recheck stage; it duplicated URL and Gemini requests.
 	finalNodes := finalCandidates
-	if err := writeSubscription(filepath.Join(opts.OutDir, "gemini-available.txt"), finalNodes); err != nil {
+	if err := writeGeminiResults(opts.OutDir, finalNodes, parsed, urlPassed, speedPassed, opts.GeminiFile); err != nil {
 		return err
 	}
 
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
 	printSubscriptionPassSummary(stdout, sources, sourcePassCounts)
 	fmt.Fprintf(stdout, "Output directory: %s\n", opts.OutDir)
-	fmt.Fprintln(stdout, "Output: all.txt, url-test-finished.txt, speedtest-finished.txt, gemini-available.txt, and protocol-only working lists (all files contain URI lines)")
+	if opts.GeminiFile {
+		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speed-test-finished*.txt, gemini.txt and gemini-*.txt (all files contain URI lines)")
+	} else {
+		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt and speed-test-finished*.txt; Gemini-available nodes are marked with 'Gemini 🐱' in every applicable file")
+	}
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
 			fmt.Fprintf(stderr, "[UPLOAD] ERROR: %v\n", uploadErr)
@@ -1361,8 +1365,8 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
 		"all.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt",
-		"speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
-		"final.txt", "gemini-available.txt", "report.csv",
+		"speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
+		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
 		"speedtest-finished.json", "speedtest-failed.json", "tested.json", "service-check-results.json", "final.json",
 	}
@@ -1392,23 +1396,73 @@ func cleanOutputArtifacts(dir string) error {
 	return nil
 }
 
-// writeWorkingProtocolFiles exports only URL-test-passed nodes, grouped by protocol.
-// It is called after every successful URL test, so subscriptions grow live.
-func writeWorkingProtocolFiles(dir string, nodes []sub.Node) error {
-	groups := groupProtocols(nodes)
-	for _, protocol := range []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http", "unknown"} {
-		group := groups[protocol]
-		if len(group) == 0 {
-			if err := os.Remove(filepath.Join(dir, protocol+".txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+const geminiNameSuffix = " Gemini 🐱"
+
+// writeGeminiResults exports Gemini-available nodes separately when enabled.
+// When disabled, it marks those nodes and refreshes every earlier stage list so
+// the marker is present wherever the same node appears.
+func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes []sub.Node, separateFile bool) error {
+	if separateFile {
+		return writeStageFiles(dir, "gemini", geminiNodes, true)
+	}
+	if err := os.Remove(filepath.Join(dir, "gemini.txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := clearProtocolSubscriptions(dir, "gemini"); err != nil {
+		return err
+	}
+
+	markGeminiNodes(geminiNodes)
+	for _, group := range [][]sub.Node{allNodes, urlNodes, speedNodes} {
+		applyNodeUpdatesByIdentity(group, geminiNodes)
+	}
+	if err := writeSubscription(filepath.Join(dir, "all.txt"), allNodes); err != nil {
+		return err
+	}
+	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+		return err
+	}
+	return writeStageFiles(dir, "speed-test-finished", speedNodes, true)
+}
+
+func markGeminiNodes(nodes []sub.Node) {
+	for i := range nodes {
+		if !geminiAvailable(nodes[i]) {
 			continue
 		}
-		if err := writeSubscription(filepath.Join(dir, protocol+".txt"), group); err != nil {
-			return err
+		name := strings.TrimSpace(nodes[i].Name)
+		if strings.HasSuffix(name, geminiNameSuffix) {
+			continue
+		}
+		if name == "" {
+			name = nodes[i].Protocol
+		}
+		if nodes[i].Outbound == nil {
+			nodes[i].Outbound = make(map[string]any)
+		}
+		sub.RenameNode(&nodes[i], name+geminiNameSuffix)
+	}
+}
+
+func applyNodeUpdatesByIdentity(nodes, updates []sub.Node) {
+	byIdentity := make(map[string]sub.Node, len(updates))
+	for _, n := range updates {
+		key := n.Key
+		if key == "" {
+			key = n.URI
+		}
+		byIdentity[key] = n
+	}
+	for i := range nodes {
+		key := nodes[i].Key
+		if key == "" {
+			key = nodes[i].URI
+		}
+		if updated, ok := byIdentity[key]; ok {
+			nodes[i].URI = updated.URI
+			nodes[i].Name = updated.Name
 		}
 	}
-	return nil
 }
 
 // removeLegacyJSONArtifacts clears output snapshots from versions that exported
@@ -1417,7 +1471,7 @@ func removeLegacyJSONArtifacts(dir string) error {
 	bases := []string{
 		"all", "unique", "selected",
 		"url-test-finished", "url-test-failed",
-		"speedtest-finished", "speedtest-failed", "tested",
+		"speed-test-finished", "speedtest-failed", "tested",
 		"service-check-results", "final",
 	}
 	for _, base := range bases {

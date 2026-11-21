@@ -14,6 +14,7 @@ type Options struct {
 	Sources            string
 	SourceTimeout      time.Duration
 	OutDir             string
+	GeminiFile         bool
 	Interface          string
 	IsolateSourceDownloads bool
 	NetworkNamespace   string
@@ -113,12 +114,13 @@ type fileConfig struct {
 		Directory        string `json:"directory"`
 		SplitByProtocol  bool   `json:"split_by_protocol"`
 		SubscriptionText *bool  `json:"subscription_text"`
+		GeminiFile       *bool  `json:"gemini_file"`
 	} `json:"output"`
 }
 
 func DefaultOptions() Options {
 	return Options{
-		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto",
+		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true,
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4,
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
@@ -276,6 +278,9 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.Output.SubscriptionText != nil {
 		opts.WriteText = *cfg.Output.SubscriptionText
 	}
+	if cfg.Output.GeminiFile != nil {
+		opts.GeminiFile = *cfg.Output.GeminiFile
+	}
 
 	// Make a starter source list on first run so the next error is actionable.
 	if err := writeDefaultIfMissing(opts.Sources, "# One subscription URL, local file path, or single share link per line.\n# https://example.net/subscription\n# ./my-subscription.txt\n"); err != nil {
@@ -371,7 +376,8 @@ func ExampleConfig() string {
   "output": {
     "directory": "out",
     "split_by_protocol": true,
-    "subscription_text": true
+    "subscription_text": true,
+    "gemini_file": true
   },
   "remote_upload": {
     "enabled": false,
