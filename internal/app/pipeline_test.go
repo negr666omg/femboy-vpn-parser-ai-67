@@ -515,6 +515,34 @@ func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	}
 }
 
+func TestClearProtocolSubscriptionsPreservesUnrelatedFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		"url-test-finished-vless.txt",
+		"url-test-finished-ss.txt",
+		"url-test-finished-personal-notes.txt",
+		"url-test-finished-vpn-backup.txt",
+		"speed-test-finished-vless.txt",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := clearProtocolSubscriptions(dir, "url-test-finished"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"url-test-finished-vless.txt", "url-test-finished-ss.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("generated protocol file %s remains: %v", name, err)
+		}
+	}
+	for _, name := range []string{"url-test-finished-personal-notes.txt", "url-test-finished-vpn-backup.txt", "speed-test-finished-vless.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("unrelated file %s was removed: %v", name, err)
+		}
+	}
+}
+
 func TestLoadSourcesSkipsTimedOutSubscriptionAndContinues(t *testing.T) {
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(150 * time.Millisecond)
