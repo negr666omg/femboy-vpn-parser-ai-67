@@ -205,12 +205,12 @@ func LoadOptions(path string) (Options, error) {
 		}
 		opts.SpeedTimeout = d
 	}
-	for _, item := range []struct{name, value string; target *time.Duration}{
-		{"speed_test.first_byte_timeout", cfg.SpeedTest.FirstByteTimeout, &opts.FirstByteTimeout},
-		{"speed_test.max_duration", cfg.SpeedTest.MaxDuration, &opts.MaxSpeedDuration},
-		{"speed_test.sample_interval", cfg.SpeedTest.SampleInterval, &opts.SpeedSampleInterval},
-	} {
-		if item.value != "" { d, e := time.ParseDuration(item.value); if e != nil || d <= 0 { return opts, fmt.Errorf("%s must be a positive duration: %q", item.name, item.value) }; *item.target = d }
+	if cfg.SpeedTest.MaxDuration != "" {
+		d, e := time.ParseDuration(cfg.SpeedTest.MaxDuration)
+		if e != nil || d <= 0 {
+			return opts, fmt.Errorf("speed_test.max_duration must be a positive duration: %q", cfg.SpeedTest.MaxDuration)
+		}
+		opts.MaxSpeedDuration = d
 	}
 	if cfg.SpeedTest.MinDownload != nil {
 		opts.MinDownload = *cfg.SpeedTest.MinDownload
@@ -218,17 +218,46 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.SpeedTest.MinUpload != nil {
 		opts.MinUpload = *cfg.SpeedTest.MinUpload
 	}
-	if cfg.SpeedTest.DownloadBytes > 0 {
-		opts.DownloadBytes = cfg.SpeedTest.DownloadBytes
-	}
-	if cfg.SpeedTest.UploadBytes > 0 {
-		opts.UploadBytes = cfg.SpeedTest.UploadBytes
-	}
-	if cfg.SpeedTest.DownloadURL != "" {
-		opts.SpeedDownloadURL = cfg.SpeedTest.DownloadURL
-	}
-	if cfg.SpeedTest.UploadURL != "" {
-		opts.SpeedUploadURL = cfg.SpeedTest.UploadURL
+
+	if opts.SpeedProvider == "cloudflare" {
+		for _, item := range []struct {
+			name   string
+			value  string
+			target *time.Duration
+		}{
+			{"speed_test.first_byte_timeout", cfg.SpeedTest.FirstByteTimeout, &opts.FirstByteTimeout},
+			{"speed_test.sample_interval", cfg.SpeedTest.SampleInterval, &opts.SpeedSampleInterval},
+		} {
+			if item.value == "" {
+				continue
+			}
+			d, e := time.ParseDuration(item.value)
+			if e != nil || d <= 0 {
+				return opts, fmt.Errorf("%s must be a positive duration: %q", item.name, item.value)
+			}
+			*item.target = d
+		}
+		if cfg.SpeedTest.DownloadBytes > 0 {
+			opts.DownloadBytes = cfg.SpeedTest.DownloadBytes
+		}
+		if cfg.SpeedTest.UploadBytes > 0 {
+			opts.UploadBytes = cfg.SpeedTest.UploadBytes
+		}
+		if cfg.SpeedTest.DownloadURL != "" {
+			opts.SpeedDownloadURL = cfg.SpeedTest.DownloadURL
+		}
+		if cfg.SpeedTest.UploadURL != "" {
+			opts.SpeedUploadURL = cfg.SpeedTest.UploadURL
+		}
+	} else {
+		// Ookla owns its server selection and transfer sizes. Cloudflare-only
+		// settings are intentionally ignored, even when present in old configs.
+		opts.FirstByteTimeout = 0
+		opts.SpeedSampleInterval = 0
+		opts.DownloadBytes = 0
+		opts.UploadBytes = 0
+		opts.SpeedDownloadURL = ""
+		opts.SpeedUploadURL = ""
 	}
 	if cfg.ServiceCheck.Concurrency > 0 {
 		opts.ServiceConcurrency = cfg.ServiceCheck.Concurrency
