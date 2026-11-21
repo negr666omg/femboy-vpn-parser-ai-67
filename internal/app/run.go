@@ -557,13 +557,10 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
 	}
-	// Preserve the previous successful output if every remote source is
-	// temporarily unreachable. The CLI will retry this whole attempt.
+	// Preserve previous output if every remote source remained unreachable
+	// after its bounded retries. Do not restart the whole cycle indefinitely.
 	if opts.RetryOnConnectionError && len(parsed) == 0 && allSourcesFailedWithTransientConnections(sources) {
-		return newRetryableConnectionError(
-			"all remote subscription sources are temporarily unreachable",
-			fmt.Errorf("no supported proxy nodes found (source failures: %d; check connectivity and retry)", sourceErrors),
-		)
+		return fmt.Errorf("all remote subscription sources remained unreachable after %d retries; previous output was preserved", maxSourceDownloadRetries)
 	}
 	// Once the current sources have been parsed, remove stale generated files
 	// immediately before writing this run's results.
@@ -591,11 +588,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return err
 	}
 	if len(parsed) == 0 {
-		err := fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
-		if opts.RetryOnConnectionError && allSourcesFailedWithTransientConnections(sources) {
-			return newRetryableConnectionError("all remote subscription sources are temporarily unreachable", err)
-		}
-		return err
+		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
 	}
 	fmt.Fprintf(stdout, "Parsed: %d | invalid: %d | source errors: %d | metadata lines: %d\n", len(parsed), invalid, sourceErrors, len(metadata))
 
@@ -945,9 +938,20 @@ func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Durat
 	return loadSourcesWithFetcherProgress(ctx, path, timeout, fetch, nil)
 }
 
+const maxSourceDownloadRetries = 3
+
 func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress), retryTransientConnection ...bool) ([]loadedSource, error) {
+	return loadSourcesWithFetcherProgressAndWait(ctx, path, timeout, fetch, progress, waitForConnectionRetry, retryTransientConnection...)
+}
+
+// The retry wait is injectable so bounded retry behavior can be tested without
+// sleeping between attempts.
+func loadSourcesWithFetcherProgressAndWait(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress), retryWait func(context.Context) error, retryTransientConnection ...bool) ([]loadedSource, error) {
 	if fetch == nil {
 		fetch = fetchHTTPSource
+	}
+	if retryWait == nil {
+		retryWait = waitForConnectionRetry
 	}
 	report := func(p sourceProgress) {
 		if progress != nil {
@@ -1001,6 +1005,8 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 				source.LoadError = fmt.Errorf("invalid subscription URL")
 			} else {
 				retry := len(retryTransientConnection) > 0 && retryTransientConnection[0]
+				retries := 0
+				retryExhausted := false
 				for {
 					body, fetchErr := fetch(ctx, entry, timeout)
 					if fetchErr == nil {
@@ -1011,11 +1017,18 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 						return sources, ctx.Err()
 					}
 					if retry && isTransientNetworkError(fetchErr) {
+						if retries >= maxSourceDownloadRetries {
+							source.LoadError = fmt.Errorf("download failed after %d retries: %w", maxSourceDownloadRetries, fetchErr)
+							source.TransientConnectionError = true
+							retryExhausted = true
+							break
+						}
+						retries++
 						report(sourceProgress{
 							Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount,
-							Reference: entry, Phase: "connection unavailable; retrying in 5s",
+							Reference: entry, Phase: fmt.Sprintf("connection unavailable; retry %d/%d in 5s", retries, maxSourceDownloadRetries),
 						})
-						if waitErr := waitForConnectionRetry(ctx); waitErr != nil {
+						if waitErr := retryWait(ctx); waitErr != nil {
 							return sources, waitErr
 						}
 						continue
@@ -1023,6 +1036,12 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 					source.LoadError = fmt.Errorf("download failed: %w", fetchErr)
 					source.TransientConnectionError = isTransientNetworkError(fetchErr)
 					break
+				}
+				if retryExhausted {
+					report(sourceProgress{
+						Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount + 1,
+						Reference: entry, Phase: fmt.Sprintf("failed after %d retries; skipped", maxSourceDownloadRetries),
+					})
 				}
 			}
 		} else if phase == "loading inline link" {
@@ -1037,7 +1056,9 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 		}
 		if source.LoadError != nil {
 			skippedCount++
-			report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: "failed"})
+			if !source.TransientConnectionError || !strings.Contains(source.LoadError.Error(), "after 3 retries") {
+				report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: "failed"})
+			}
 		} else {
 			loadedCount++
 			finishedPhase := "loaded"
