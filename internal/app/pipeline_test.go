@@ -1075,7 +1075,7 @@ func TestTransientNetworkErrorClassification(t *testing.T) {
 func TestLoadSourcesMarksTransientRemoteFailures(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sources.txt")
-	if err := os.WriteFile(path, []byte("https://timeout.example/sub\\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("https://timeout.example/sub"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	sources, err := loadSourcesWithFetcher(context.Background(), path, time.Second, func(context.Context, string, time.Duration) ([]byte, error) {
@@ -1095,6 +1095,35 @@ func TestLoadSourcesMarksTransientRemoteFailures(t *testing.T) {
 	}
 	if sources[0].TransientConnectionError {
 		t.Fatal("HTTP 404 must not be retried as a transient network failure")
+	}
+}
+
+func TestSourceRetryWaitStopsOnCancellation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sources.txt")
+	if err := os.WriteFile(path, []byte("https://timeout.example/sub"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	sources, err := loadSourcesWithFetcherProgress(ctx, path, time.Second,
+		func(context.Context, string, time.Duration) ([]byte, error) {
+			calls++
+			return nil, errors.New("dial tcp: i/o timeout")
+		},
+		func(progress sourceProgress) {
+			if progress.Phase == "connection unavailable; retrying in 5s" {
+				cancel()
+			}
+		},
+		true,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation during retry wait, got %v (sources=%#v)", err, sources)
+	}
+	if calls != 1 {
+		t.Fatalf("fetch attempts before cancellation = %d, want 1", calls)
 	}
 }
 
