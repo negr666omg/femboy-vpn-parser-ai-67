@@ -1282,7 +1282,6 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 	var progressMu sync.Mutex
 	var callbackErr error
 	done, successes := 0, 0
-	lastPing := "—"
 	terminalLastRow := 0
 	terminalRowsKnown := false
 	type workerStatus struct {
@@ -1308,8 +1307,8 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 					active++
 				}
 			}
-			header := fmt.Sprintf("[%s] last ping: %s | %d/%d | active: %d | passed: %d | failed: %d",
-				label, lastPing, done, len(nodes), active, successes, done-successes)
+			header := fmt.Sprintf("[%s] %d/%d | active: %d | passed: %d | failed: %d",
+				label, done, len(nodes), active, successes, done-successes)
 			if terminalRowsDrawn {
 				fmt.Fprintf(stdout, "\x1b[%dA", concurrency+1)
 			}
@@ -1357,7 +1356,7 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 				visible = i
 			}
 		}
-		line := formatLiveStatusLine(label, done, len(nodes), successes, lastPing, statuses[visible].node, statuses[visible].detail, 0)
+		line := formatLiveStatusLine(label, done, len(nodes), successes, statuses[visible].node, statuses[visible].detail, 0)
 		fmt.Fprintf(stdout, "\r\x1b[2K%s", line)
 	}
 
@@ -1369,15 +1368,20 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 				results[i] = nodes[i]
 
 				progressMu.Lock()
-				statuses[workerID] = workerStatus{node: results[i], detail: "starting…", active: true}
+				statuses[workerID].active = true
+				if optsLiveDisplayModeImmediate(mouseArgs, label) {
+					statuses[workerID] = workerStatus{node: results[i], detail: "starting…", active: true}
+				}
 				render()
 				progressMu.Unlock()
 
 				emit := func(node sub.Node, detail string) {
 					progressMu.Lock()
-					statuses[workerID].node = node
-					statuses[workerID].detail = cleanLiveText(detail)
-					render()
+					if !optsLiveDisplayModeDeferred(mouseArgs, label) {
+						statuses[workerID].node = node
+						statuses[workerID].detail = cleanLiveText(detail)
+						render()
+					}
 					progressMu.Unlock()
 				}
 
@@ -1388,15 +1392,20 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 				}
 
 				progressMu.Lock()
+				// In after_result mode, publish the new server only after its
+				// test has returned a definitive pass/fail result. Until then
+				// this worker row keeps the previous server's complete line.
+				if optsLiveDisplayModeDeferred(mouseArgs, label) {
+					statuses[workerID].node = results[i]
+					statuses[workerID].detail = stageResultDetail(label, results[i])
+					render()
+				}
 				if onComplete != nil && callbackErr == nil {
 					if err := onComplete(results[i]); err != nil {
 						callbackErr = err
 					}
 				}
 				done++
-				if results[i].URLPassed && results[i].URLLatencyMS > 0 {
-					lastPing = fmt.Sprintf("%d ms", results[i].URLLatencyMS)
-				}
 				if passed(&results[i]) {
 					successes++
 				}
@@ -1503,8 +1512,8 @@ func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
 // counters remain first; the config name and stage details share the remaining
 // width and are shortened as needed. One terminal column is reserved to avoid
 // accidental auto-wrap at the right margin.
-func formatLiveStatusLine(label string, done, total, passed int, lastPing string, node sub.Node, detail string, terminalWidth int) string {
-	head := fmt.Sprintf("[%s] last ping: %s | %d/%d | passed: %d | failed: %d", label, lastPing, done, total, passed, done-passed)
+func formatLiveStatusLine(label string, done, total, passed int, node sub.Node, detail string, terminalWidth int) string {
+	head := fmt.Sprintf("[%s] %d/%d | passed: %d | failed: %d", label, done, total, passed, done-passed)
 	return formatLiveStatusParts(head, liveNodeTitle(node), detail, livePingText(node), terminalWidth)
 }
 
