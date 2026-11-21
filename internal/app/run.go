@@ -1812,7 +1812,7 @@ func cleanOutputArtifacts(dir string) error {
 		"speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
-		"speedtest-finished.json", "speedtest-failed.json", "tested.json", "service-check-results.json", "final.json",
+		"speed-test-finished.json", "speedtest-finished.json", "speedtest-failed.json", "tested.json", "service-check-results.json", "final.json",
 	}
 	for _, name := range known {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1849,6 +1849,16 @@ func cleanOutputArtifacts(dir string) error {
 					return err
 				}
 			}
+		}
+	}
+	// Interrupted atomic writes can leave temporary files behind after a crash.
+	temps, err := filepath.Glob(filepath.Join(dir, ".subwatch-*.tmp"))
+	if err != nil {
+		return err
+	}
+	for _, path := range temps {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 	}
 	return nil
