@@ -505,8 +505,8 @@ func TestClearProtocolSubscriptionsPreservesUnrelatedFiles(t *testing.T) {
 	for _, name := range []string{
 		"url-tested-vless.txt",
 		"url-tested-ss.txt",
-		"url-test-finished-personal-notes.txt",
-		"url-test-finished-vpn-backup.txt",
+		"url-tested-personal-notes.txt",
+		"url-tested-vpn-backup.txt",
 		"speedtested-vless.txt",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
@@ -521,7 +521,7 @@ func TestClearProtocolSubscriptionsPreservesUnrelatedFiles(t *testing.T) {
 			t.Fatalf("generated protocol file %s remains: %v", name, err)
 		}
 	}
-	for _, name := range []string{"url-test-finished-personal-notes.txt", "url-test-finished-vpn-backup.txt", "speedtested-vless.txt"} {
+	for _, name := range []string{"url-tested-personal-notes.txt", "url-tested-vpn-backup.txt", "speedtested-vless.txt"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("unrelated file %s was removed: %v", name, err)
 		}
