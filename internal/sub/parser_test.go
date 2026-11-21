@@ -234,12 +234,19 @@ func TestParseVMessPayloadWithSlashPath(t *testing.T) {
 	// not be lost when net/url splits the URI into host and path components.
 	config := []byte(`{"v":"2","ps":"slash","add":"example.test","port":"443","id":"11111111-1111-4111-8111-111111111111","extra":"??????"}`)
 	encoded := base64.StdEncoding.EncodeToString(config)
-	encoded = strings.ReplaceAll(encoded, "/", "/")
 	node, err := ParseURI("vmess://" + encoded)
 	if err != nil {
 		t.Fatalf("parse VMess payload: %v", err)
 	}
 	if node.Outbound["type"] != "vmess" {
 		t.Fatalf("unexpected outbound type: %#v", node.Outbound["type"])
+	}
+	RenameNode(&node, "slash payload renamed")
+	renamed, err := ParseURI(node.URI)
+	if err != nil {
+		t.Fatalf("parse renamed slash payload: %v", err)
+	}
+	if renamed.Name != "slash payload renamed" {
+		t.Fatalf("renamed slash-payload name = %q", renamed.Name)
 	}
 }
