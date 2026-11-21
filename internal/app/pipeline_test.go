@@ -267,7 +267,7 @@ func TestWriteStageFilesRemovesStaleProtocolSplitsWhenDisabled(t *testing.T) {
 
 func TestRemoveLegacyJSONArtifacts(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"all.json", "final.json", "final-vless.json", "report.csv.json", "keep.json"} {
+	for _, name := range []string{"all.json", "final.json", "final-vless.json", "final-personal.json", "report.csv.json", "keep.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -280,7 +280,7 @@ func TestRemoveLegacyJSONArtifacts(t *testing.T) {
 			t.Fatalf("legacy artifact %s was not removed", name)
 		}
 	}
-	for _, name := range []string{"report.csv.json", "keep.json"} {
+	for _, name := range []string{"final-personal.json", "report.csv.json", "keep.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("unrelated file %s was removed: %v", name, err)
 		}
