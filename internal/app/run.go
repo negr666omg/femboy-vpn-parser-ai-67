@@ -385,7 +385,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}, nil)
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
-	if err := writeStageFiles(opts.OutDir, "speedtest-finished", speedPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "speed-test-finished", speedPassed, true); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Speed test complete: %d passed / %d failed.\n", len(speedPassed), len(speedFailed))
@@ -425,9 +425,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	printSubscriptionPassSummary(stdout, sources, sourcePassCounts)
 	fmt.Fprintf(stdout, "Output directory: %s\n", opts.OutDir)
 	if opts.GeminiFile {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speedtest-finished*.txt, gemini.txt and gemini-*.txt (all files contain URI lines)")
+		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speed-test-finished*.txt, gemini.txt and gemini-*.txt (all files contain URI lines)")
 	} else {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt and speedtest-finished*.txt; Gemini-available nodes are marked with 'Gemini 🐱' in every applicable file")
+		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt and speed-test-finished*.txt; Gemini-available nodes are marked with 'Gemini 🐱' in every applicable file")
 	}
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
@@ -1365,7 +1365,7 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
 		"all.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt",
-		"speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
+		"speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
 		"speedtest-finished.json", "speedtest-failed.json", "tested.json", "service-check-results.json", "final.json",
@@ -1405,6 +1405,12 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 	if separateFile {
 		return writeStageFiles(dir, "gemini", geminiNodes, true)
 	}
+	if err := os.Remove(filepath.Join(dir, "gemini.txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := clearProtocolSubscriptions(dir, "gemini"); err != nil {
+		return err
+	}
 
 	markGeminiNodes(geminiNodes)
 	for _, group := range [][]sub.Node{allNodes, urlNodes, speedNodes} {
@@ -1416,7 +1422,7 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
 		return err
 	}
-	return writeStageFiles(dir, "speedtest-finished", speedNodes, true)
+	return writeStageFiles(dir, "speed-test-finished", speedNodes, true)
 }
 
 func markGeminiNodes(nodes []sub.Node) {
@@ -1462,7 +1468,7 @@ func removeLegacyJSONArtifacts(dir string) error {
 	bases := []string{
 		"all", "unique", "selected",
 		"url-test-finished", "url-test-failed",
-		"speedtest-finished", "speedtest-failed", "tested",
+		"speed-test-finished", "speedtest-failed", "tested",
 		"service-check-results", "final",
 	}
 	for _, base := range bases {
