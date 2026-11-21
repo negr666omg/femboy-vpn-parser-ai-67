@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
