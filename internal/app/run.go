@@ -1592,8 +1592,8 @@ func renderNodeName(template, country string, download, upload float64) string {
 	return strings.NewReplacer(
 		"{flag}", flag,
 		"{country}", countryName,
-		"{download}", formatMbps(download, 0),
-		"{upload}", formatMbps(upload, 0),
+		"{download}", formatMbps(download),
+		"{upload}", formatMbps(upload),
 	).Replace(template)
 }
 
@@ -1733,7 +1733,7 @@ func countryFlag(code string) string {
 	return string([]rune{rune(0x1F1E6 + int(code[0]) - 65), rune(0x1F1E6 + int(code[1]) - 65)})
 }
 
-func formatMbps(value float64, _ int) string {
+func formatMbps(value float64) string {
 	// Round Mbps to the nearest whole number for names and summaries.
 	return strconv.FormatInt(int64(math.Round(value)), 10)
 }
