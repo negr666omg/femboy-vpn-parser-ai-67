@@ -181,7 +181,14 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
 	}
 
-	fmt.Fprintf(stdout, "[1/4] PARSE: reading %s\n", opts.Sources)
+	var sourceProgressRendered bool
+	renderSourceProgress := func(progress sourceProgress) {
+		sourceProgressRendered = true
+		line := formatSourceProgressLine(progress, liveTerminalWidth(stdout))
+		fmt.Fprintf(stdout, "\r\x1b[2K%s", line)
+	}
+	renderSourceProgress(sourceProgress{Reference: opts.Sources, Phase: "reading source list"})
+
 	var sources []loadedSource
 	var err error
 	if sourceNamespace != nil {
@@ -189,11 +196,15 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		if exeErr != nil {
 			return fmt.Errorf("locate SubWatch executable for isolated source downloads: %w", exeErr)
 		}
-		sources, err = loadSourcesWithFetcher(ctx, opts.Sources, sourceDownloadTimeout, func(fetchCtx context.Context, sourceURL string, _ time.Duration) ([]byte, error) {
+		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, sourceDownloadTimeout, func(fetchCtx context.Context, sourceURL string, _ time.Duration) ([]byte, error) {
 			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL)
-		})
+		}, renderSourceProgress)
 	} else {
-		sources, err = loadSources(ctx, opts.Sources)
+		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, sourceDownloadTimeout, fetchHTTPSource, renderSourceProgress)
+	}
+	if sourceProgressRendered {
+		fmt.Fprintln(stdout)
+		sourceProgressRendered = false
 	}
 	if err != nil {
 		return err
@@ -218,29 +229,56 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// tested once globally, then credited to every source that contained them.
 	perSourceNodes := make([][]sub.Node, len(sources))
 	invalid, sourceErrors := 0, 0
+	var sourceDiagnostics []string
 	for i, source := range sources {
 		if source.LoadError != nil {
+			renderSourceProgress(sourceProgress{
+				Index: i + 1, Total: len(sources), Loaded: loadedCount, Skipped: skippedCount,
+				Reference: source.Reference, Phase: "skipping failed source",
+			})
 			sourceErrors++
 			lineNo := source.Line
 			if lineNo < 1 {
 				lineNo = i + 1
 			}
-			fmt.Fprintf(stderr, "source %d (%s): skipped: %v\n", lineNo, source.Reference, source.LoadError)
+			sourceDiagnostics = append(sourceDiagnostics, fmt.Sprintf("source %d (%s): skipped: %v", lineNo, sourceProgressTitle(source.Reference), source.LoadError))
 			continue
 		}
-		nodes, bad, parseErr := sub.ParseDocument(source.Body)
+		progress := sourceProgress{
+			Index: i + 1, Total: len(sources), Loaded: loadedCount, Skipped: skippedCount,
+			Reference: source.Reference, Phase: "parsing",
+		}
+		renderSourceProgress(progress)
+		nodes, bad, parseErr := sub.ParseDocumentWithProgress(source.Body, func(processed, total, parsedNodes, invalidLines int) {
+			progress.LinesProcessed, progress.TotalLines = processed, total
+			progress.Nodes, progress.Invalid = parsedNodes, invalidLines
+			renderSourceProgress(progress)
+		})
 		invalid += bad
 		if parseErr != nil {
+			progress.Phase = "parse failed"
+			renderSourceProgress(progress)
 			sourceErrors++
 			lineNo := source.Line
 			if lineNo < 1 {
 				lineNo = i + 1
 			}
-			fmt.Fprintf(stderr, "source %d (%s): %v\n", lineNo, source.Reference, parseErr)
+			sourceDiagnostics = append(sourceDiagnostics, fmt.Sprintf("source %d (%s): %v", lineNo, sourceProgressTitle(source.Reference), parseErr))
 			continue
 		}
 		perSourceNodes[i] = nodes
 		parsed = append(parsed, nodes...)
+		progress.Phase = "parsed"
+		progress.LinesProcessed = progress.TotalLines
+		progress.Nodes = len(nodes)
+		progress.Invalid = bad
+		renderSourceProgress(progress)
+	}
+	if sourceProgressRendered {
+		fmt.Fprintln(stdout)
+	}
+	for _, diagnostic := range sourceDiagnostics {
+		fmt.Fprintln(stderr, diagnostic)
 	}
 	if len(parsed) == 0 {
 		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
@@ -407,14 +445,33 @@ func loadSources(ctx context.Context, path string) ([]loadedSource, error) {
 // remaining sources. Only cancellation of the whole run aborts the operation.
 type sourceFetcher func(context.Context, string, time.Duration) ([]byte, error)
 
+type sourceProgress struct {
+	Index, Total       int
+	Loaded, Skipped    int
+	Reference, Phase   string
+	LinesProcessed     int
+	TotalLines         int
+	Nodes, Invalid     int
+}
+
 func loadSourcesWithTimeout(ctx context.Context, path string, timeout time.Duration) ([]loadedSource, error) {
 	return loadSourcesWithFetcher(ctx, path, timeout, fetchHTTPSource)
 }
 
 func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher) ([]loadedSource, error) {
+	return loadSourcesWithFetcherProgress(ctx, path, timeout, fetch, nil)
+}
+
+func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress)) ([]loadedSource, error) {
 	if fetch == nil {
 		fetch = fetchHTTPSource
 	}
+	report := func(p sourceProgress) {
+		if progress != nil {
+			progress(p)
+		}
+	}
+	report(sourceProgress{Reference: path, Phase: "reading source list"})
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -422,33 +479,55 @@ func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Durat
 	if len(data) > 2<<20 {
 		return nil, fmt.Errorf("%s exceeds 2 MiB", path)
 	}
-	var sources []loadedSource
+	var entries []struct {
+		line int
+		text string
+	}
 	for lineNo, line := range strings.Split(string(data), "\n") {
-		if err := ctx.Err(); err != nil {
-			return sources, err
-		}
 		entry := strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
 		if entry == "" || strings.HasPrefix(entry, "#") {
 			continue
 		}
-		source := loadedSource{Reference: entry, Line: lineNo + 1}
+		entries = append(entries, struct {
+			line int
+			text string
+		}{line: lineNo + 1, text: entry})
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("%s contains no sources", path)
+	}
+
+	var sources []loadedSource
+	loadedCount, skippedCount := 0, 0
+	for index, item := range entries {
+		if err := ctx.Err(); err != nil {
+			return sources, err
+		}
+		entry := item.text
+		source := loadedSource{Reference: entry, Line: item.line}
+		phase := "reading local file"
 		if strings.HasPrefix(entry, "http://") || strings.HasPrefix(entry, "https://") {
+			phase = "downloading"
+		} else if strings.Contains(entry, "://") {
+			phase = "loading inline link"
+		}
+		report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: phase})
+		if phase == "downloading" {
 			u, parseErr := url.Parse(entry)
 			if parseErr != nil || u.Host == "" {
 				source.LoadError = fmt.Errorf("invalid subscription URL")
-				sources = append(sources, source)
-				continue
-			}
-			body, fetchErr := fetch(ctx, entry, timeout)
-			if fetchErr != nil {
-				if ctx.Err() != nil {
-					return sources, ctx.Err()
-				}
-				source.LoadError = fmt.Errorf("download failed: %w", fetchErr)
 			} else {
-				source.Body = body
+				body, fetchErr := fetch(ctx, entry, timeout)
+				if fetchErr != nil {
+					if ctx.Err() != nil {
+						return sources, ctx.Err()
+					}
+					source.LoadError = fmt.Errorf("download failed: %w", fetchErr)
+				} else {
+					source.Body = body
+				}
 			}
-		} else if strings.Contains(entry, "://") {
+		} else if phase == "loading inline link" {
 			source.Body = []byte(entry)
 		} else {
 			local, readErr := os.ReadFile(entry)
@@ -458,11 +537,20 @@ func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Durat
 				source.Body = local
 			}
 		}
+		if source.LoadError != nil {
+			skippedCount++
+			report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: "failed"})
+		} else {
+			loadedCount++
+			finishedPhase := "loaded"
+			if phase == "downloading" {
+				finishedPhase = "downloaded"
+			}
+			report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: finishedPhase})
+		}
 		sources = append(sources, source)
 	}
-	if len(sources) == 0 {
-		return nil, fmt.Errorf("%s contains no sources", path)
-	}
+	report(sourceProgress{Index: len(entries), Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Phase: "all sources loaded"})
 	return sources, nil
 }
 
@@ -550,6 +638,56 @@ func FetchSourceCommand() error {
 	}
 	_, err = os.Stdout.Write(body)
 	return err
+}
+
+func sourceProgressTitle(reference string) string {
+	reference = strings.TrimSpace(reference)
+	if parsed, err := url.Parse(reference); err == nil && parsed.Scheme != "" {
+		scheme := strings.ToLower(parsed.Scheme)
+		switch scheme {
+		case "http", "https":
+			if parsed.Host != "" {
+				return parsed.Host
+			}
+		case "vless", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "socks", "socks5":
+			if parsed.Host != "" {
+				return scheme + "://" + parsed.Host
+			}
+		case "vmess":
+			return "vmess link"
+		}
+		return scheme + " source"
+	}
+	base := filepath.Base(reference)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return "subscription source"
+	}
+	return base
+}
+
+func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string {
+	identity := cleanLiveText(sourceProgressTitle(progress.Reference))
+	head := "[PARSE]"
+	if progress.Total > 0 {
+		head = fmt.Sprintf("[PARSE %d/%d ok:%d skip:%d]", progress.Index, progress.Total, progress.Loaded, progress.Skipped)
+	}
+	detail := cleanLiveText(progress.Phase)
+	if progress.Phase == "parsing" || progress.Phase == "parsed" {
+		verb := "lines"
+		if progress.Phase == "parsed" {
+			verb = "parsed"
+		}
+		detail = fmt.Sprintf("%s %d/%d | nodes %d | bad %d", verb, progress.LinesProcessed, progress.TotalLines, progress.Nodes, progress.Invalid)
+	}
+	line := strings.TrimSpace(head + " | " + identity + " | " + detail)
+	if terminalWidth > 0 {
+		limit := terminalWidth - 1
+		if limit < 1 {
+			limit = 1
+		}
+		return truncateDisplay(line, limit)
+	}
+	return line
 }
 
 func collectMetadata(sources [][]byte) []string {
