@@ -484,7 +484,9 @@ func fetchHTTPSourceWithProxy(ctx context.Context, sourceURL string, timeout tim
 	req.Header.Set("User-Agent", "SubWatch/0.3.9")
 	client := &http.Client{Timeout: timeout}
 	if !useEnvironmentProxy {
-		client.Transport = &http.Transport{Proxy: nil}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		client.Transport = transport
 	}
 	resp, err := client.Do(req)
 	if err != nil {
