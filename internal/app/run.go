@@ -119,6 +119,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.Sources == "" {
 		opts.Sources = "sources.txt"
 	}
+	if opts.SourceTimeout <= 0 {
+		opts.SourceTimeout = sourceDownloadTimeout
+	}
 	if opts.OutDir == "" {
 		opts.OutDir = "out"
 	}
@@ -196,11 +199,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		if exeErr != nil {
 			return fmt.Errorf("locate SubWatch executable for isolated source downloads: %w", exeErr)
 		}
-		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, sourceDownloadTimeout, func(fetchCtx context.Context, sourceURL string, _ time.Duration) ([]byte, error) {
-			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL)
+		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, func(fetchCtx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL, timeout)
 		}, renderSourceProgress)
 	} else {
-		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, sourceDownloadTimeout, fetchHTTPSource, renderSourceProgress)
+		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetchHTTPSource, renderSourceProgress)
 	}
 	if sourceProgressRendered {
 		fmt.Fprintln(stdout)
@@ -597,8 +600,13 @@ func fetchHTTPSourceWithProxy(ctx context.Context, sourceURL string, timeout tim
 	return body, nil
 }
 
-func fetchSourceInNamespace(ctx context.Context, namespace *core.NetworkNamespace, executable, sourceURL string) ([]byte, error) {
-	cmd := namespace.Command(ctx, executable, "__fetch-source")
+func fetchSourceInNamespace(ctx context.Context, namespace *core.NetworkNamespace, executable, sourceURL string, timeout time.Duration) ([]byte, error) {
+	if timeout <= 0 {
+		timeout = sourceDownloadTimeout
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := namespace.Command(fetchCtx, executable, "__fetch-source", "--timeout", timeout.String())
 	cmd.Stdin = strings.NewReader(sourceURL + "\n")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -619,7 +627,10 @@ func fetchSourceInNamespace(ctx context.Context, namespace *core.NetworkNamespac
 // FetchSourceCommand is an internal entry point invoked by the parent process
 // through ip netns exec. The URL is read from stdin so credentials are not
 // copied into the helper process command line.
-func FetchSourceCommand() error {
+func FetchSourceCommand(timeout time.Duration) error {
+	if timeout <= 0 {
+		return fmt.Errorf("source download timeout must be positive")
+	}
 	input, err := io.ReadAll(io.LimitReader(os.Stdin, 4097))
 	if err != nil {
 		return fmt.Errorf("read source URL: %w", err)
@@ -632,7 +643,7 @@ func FetchSourceCommand() error {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return fmt.Errorf("invalid HTTP(S) source URL")
 	}
-	body, err := fetchHTTPSourceDirect(context.Background(), sourceURL, sourceDownloadTimeout)
+	body, err := fetchHTTPSourceDirect(context.Background(), sourceURL, timeout)
 	if err != nil {
 		return err
 	}
