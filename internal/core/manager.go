@@ -197,6 +197,10 @@ func (l *cappedLog) String() string {
 }
 
 func Start(ctx context.Context, binary string, outbound map[string]any, iface string, namespace ...string) (*Instance, error) {
+	return startWithRetries(ctx, binary, outbound, iface, namespace, 0)
+}
+
+func startWithRetries(ctx context.Context, binary string, outbound map[string]any, iface string, namespace []string, portRetry int) (*Instance, error) {
 	proxyBin, err := FindOrDownload(binary)
 	if err != nil {
 		return nil, err
@@ -294,7 +298,11 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 			if e == nil {
 				e = errors.New("sing-box exited before proxy became ready")
 			}
-			if detail := stderr.String(); detail != "" {
+			detail := stderr.String()
+			if strings.Contains(detail, "address already in use") && portRetry < 3 {
+				return startWithRetries(ctx, binary, outbound, iface, namespace, portRetry+1)
+			}
+			if detail != "" {
 				return nil, fmt.Errorf("%w: %s", e, detail)
 			}
 			return nil, e
