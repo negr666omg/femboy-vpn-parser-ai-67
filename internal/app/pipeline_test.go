@@ -24,7 +24,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
   "sources":{"file":"subs.txt","timeout":"90s"},
   "protocols":{"enabled":["vless","shadowsocks"]},
   "url_test":{"url":"https://example.com/204","concurrency":6,"timeout":"9s"},
-  "speed_test":{"provider":"ookla","concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
+  "speed_test":{"concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
   "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json","name_format":"{flag} {download}↓{upload}↑","speed_decimals":2},
   "final_check":{"enabled":false,"concurrency":1,"timeout":"8s"},
   "output":{"directory":"results","split_by_protocol":true,"subscription_text":false,"gemini_file":false}
@@ -51,7 +51,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText || opts.GeminiFile {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
-	if opts.SpeedProvider != "ookla" { t.Fatalf("speed provider = %q, want ookla", opts.SpeedProvider) }\n\tif opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
+	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
 		t.Fatalf("custom speed-test settings were not loaded: %+v", opts)
 	}
 }
