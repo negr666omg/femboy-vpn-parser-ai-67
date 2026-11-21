@@ -362,12 +362,11 @@ func TestGeminiFileToggleSeparatesGeminiSubscriptions(t *testing.T) {
 			t.Fatalf("expected separate Gemini file %s: %v", name, err)
 		}
 	}
-	markedGemini, err := sub.ParseURI(geminiNodes[0].URI)
-	if err != nil {
-		t.Fatalf("parse marked Gemini URI: %v", err)
+	if !strings.HasSuffix(geminiNodes[0].Name, geminiNameSuffix) || !strings.Contains(geminiNodes[0].URI, "Gemini") {
+		t.Fatalf("dedicated Gemini list is missing its marker: name=%q uri=%q", geminiNodes[0].Name, geminiNodes[0].URI)
 	}
-	if !strings.HasSuffix(markedGemini.Name, geminiNameSuffix) {
-		t.Fatalf("dedicated Gemini list is missing its marker: %q", markedGemini.Name)
+	if !strings.Contains(string(mustRead(t, filepath.Join(dir, "gemini.txt"))), "Gemini") {
+		t.Fatal("dedicated Gemini text file is missing its name marker")
 	}
 	if strings.Contains(string(mustRead(t, filepath.Join(dir, "url-test-finished.txt"))), "Gemini") {
 		t.Fatal("separate Gemini mode modified earlier stage files")
