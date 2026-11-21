@@ -114,55 +114,40 @@ func TestFilterHysteria2AlsoIncludesLegacyHysteria(t *testing.T) {
 }
 
 
-func TestWriteURLFailureReportIncludesEveryFailureAndReason(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "url-test-failures.txt")
-	nodes := []sub.Node{
-		{
-			Name: "Germany node", Protocol: "vmess",
-				URI: "vmess://uuid@example.test:443?type=ws",
-				URLLatencyMS: 8123, URLError: "start proxy: connection refused",
-		},
-		{
-			Name: "US node", Protocol: "vless",
-				URI: "vless://uuid@example.org:443",
-				URLLatencyMS: 10000, URLError: "Get \"https://example.com\": context deadline exceeded",
-		},
+func TestWriteFailureReportCombinesAllFailureStages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "failed.txt")
+	failures := []failureRecord{
+		{Stage: "SOURCE", Reason: "source 2 (subscription): timeout"},
+		{Stage: "PARSE", URI: "broken://not-a-proxy", Reason: "invalid or unsupported proxy configuration"},
+		{Stage: "URL TEST", Name: "Germany node", Protocol: "vmess", URI: "vmess://uuid@example.test:443", Reason: "start proxy: connection refused"},
+		{Stage: "SPEED TEST", Name: "US node", Protocol: "vless", URI: "vless://uuid@example.org:443", Reason: "download 4 < 8 Mbps"},
+		{Stage: "SERVICE CHECK", Name: "Japan node", Protocol: "trojan", URI: "trojan://secret@example.net:443", Reason: "Gemini status: unavailable"},
+		{Stage: "RENAME", Name: "France node", Protocol: "ss", URI: "ss://node", Reason: "GeoIP country lookup failed"},
 	}
-	if err := writeURLFailureReport(path, "https://www.gstatic.com/generate_204", nodes); err != nil {
-		t.Fatalf("writeURLFailureReport: %v", err)
+	if err := writeFailureReport(path, "https://www.gstatic.com/generate_204", failures); err != nil {
+		t.Fatalf("writeFailureReport: %v", err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read report: %v", err)
-	}
-	report := string(data)
+	report := string(mustRead(t, path))
 	for _, want := range []string{
-		"Failed nodes: 2",
-		"Germany node (vmess)",
-		"Latency: 8123 ms",
-		"start proxy: connection refused",
-		"vmess://uuid@example.test:443?type=ws",
-		"US node (vless)",
-		"context deadline exceeded",
-		"vless://uuid@example.org:443",
+		"Total issues: 6", "[1] SOURCE", "[2] PARSE", "broken://not-a-proxy",
+		"[3] URL TEST — Germany node (vmess)", "connection refused",
+		"[4] SPEED TEST — US node (vless)", "download 4 < 8 Mbps",
+		"[5] SERVICE CHECK — Japan node (trojan)", "Gemini status: unavailable",
+		"[6] RENAME — France node (ss)", "GeoIP country lookup failed",
 	} {
 		if !strings.Contains(report, want) {
-			t.Errorf("report missing %q:\n%s", want, report)
+			t.Errorf("failed report missing %q:\n%s", want, report)
 		}
 	}
 }
 
-func TestWriteURLFailureReportHandlesNoFailures(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "url-test-failures.txt")
-	if err := writeURLFailureReport(path, "https://example.com/204", nil); err != nil {
-		t.Fatalf("writeURLFailureReport: %v", err)
+func TestWriteFailureReportHandlesNoFailures(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "failed.txt")
+	if err := writeFailureReport(path, "https://example.com/204", nil); err != nil {
+		t.Fatalf("writeFailureReport: %v", err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read report: %v", err)
-	}
-	if !strings.Contains(string(data), "No URL test failures.") {
-		t.Fatalf("unexpected empty report: %s", data)
+	if report := string(mustRead(t, path)); !strings.Contains(report, "No failures recorded.") {
+		t.Fatalf("unexpected empty report: %s", report)
 	}
 }
 
@@ -227,10 +212,10 @@ func TestStageFilesContainOnlyURIs(t *testing.T) {
 		{Name: "test", Protocol: "ss", URI: "ss://example", URLPassed: true, Outbound: map[string]any{"type": "shadowsocks"}},
 		{Name: "second", Protocol: "vless", URI: "vless://user@example.test:443"},
 	}
-	if err := writeStageFiles(dir, "url-test-finished", nodes, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", nodes, true); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"url-test-finished.txt", "url-test-finished-ss.txt", "url-test-finished-vless.txt"} {
+	for _, name := range []string{"url-tested.txt", "url-tested-ss.txt", "url-tested-vless.txt"} {
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -373,8 +358,8 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 		base  string
 		nodes []sub.Node
 	}{
-		{"url-test-finished", urlNodes},
-		{"speed-test-finished", speedNodes},
+		{"url-tested", urlNodes},
+		{"speedtested", speedNodes},
 		{"gemini", geminiNodes},
 	} {
 		if err := writeStageFiles(dir, item.base, item.nodes, true); err != nil {
@@ -382,10 +367,10 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 		}
 	}
 	for name, want := range map[string]string{
-		"url-test-finished-vless.txt": "vless://url-one\n",
-		"url-test-finished-ss.txt": "ss://url-two\n",
-		"speed-test-finished.txt": "vless://speed-one\n",
-		"speed-test-finished-vless.txt": "vless://speed-one\n",
+		"url-tested-vless.txt": "vless://url-one\n",
+		"url-tested-ss.txt": "ss://url-two\n",
+		"speedtested.txt": "vless://speed-one\n",
+		"speedtested-vless.txt": "vless://speed-one\n",
 		"gemini.txt": "ss://gemini-one\n",
 		"gemini-ss.txt": "ss://gemini-one\n",
 	} {
@@ -399,10 +384,10 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 			t.Fatalf("legacy unqualified protocol file %s exists: %v", legacy, err)
 		}
 	}
-	if err := writeStageFiles(dir, "url-test-finished", []sub.Node{{Protocol: "ss", URI: "ss://only"}}, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", []sub.Node{{Protocol: "ss", URI: "ss://only"}}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "url-test-finished-vless.txt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "url-tested-vless.txt")); !os.IsNotExist(err) {
 		t.Fatal("stale URL protocol list remains")
 	}
 }
@@ -413,10 +398,10 @@ func TestGeminiFileToggleSeparatesGeminiSubscriptions(t *testing.T) {
 	urlNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "old", URI: "vless://node#old", URLPassed: true}}
 	speedNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true}}
 	geminiNodes := []sub.Node{{Key: "same", Protocol: "vless", Name: "🇫🇮 80↓50↑", URI: "vless://node#fast", URLPassed: true, SpeedPassed: true, GeminiStatus: "available"}}
-	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", urlNodes, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeStageFiles(dir, "speed-test-finished", speedNodes, true); err != nil {
+	if err := writeStageFiles(dir, "speedtested", speedNodes, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeGeminiResults(dir, geminiNodes, parsed, urlNodes, speedNodes, true); err != nil {
@@ -433,7 +418,7 @@ func TestGeminiFileToggleSeparatesGeminiSubscriptions(t *testing.T) {
 	if !strings.Contains(string(mustRead(t, filepath.Join(dir, "gemini.txt"))), "Gemini") {
 		t.Fatal("dedicated Gemini text file is missing its name marker")
 	}
-	if strings.Contains(string(mustRead(t, filepath.Join(dir, "url-test-finished.txt"))), "Gemini") {
+	if strings.Contains(string(mustRead(t, filepath.Join(dir, "url-tested.txt"))), "Gemini") {
 		t.Fatal("separate Gemini mode modified earlier stage files")
 	}
 }
@@ -447,7 +432,7 @@ func TestGeminiDisabledMarksNodesInEveryApplicableFile(t *testing.T) {
 	if err := writeGeminiResults(dir, geminiNodes, parsed, urlNodes, speedNodes, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "url-test-finished.txt", "url-test-finished-vless.txt", "speed-test-finished.txt", "speed-test-finished-vless.txt"} {
+	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt"} {
 		data := string(mustRead(t, filepath.Join(dir, name)))
 		if !strings.Contains(data, "Gemini") {
 			t.Fatalf("%s did not receive Gemini marker: %q", name, data)
@@ -492,7 +477,7 @@ func TestRunStageCallbackRunsForEachCompletedNode(t *testing.T) {
 
 func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "speed-test-finished.json", ".subwatch-interrupted.tmp", "notes-old.txt", "custom-export.json"} {
+	for _, name := range []string{"config.json", "all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt", "failed.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "speed-test-finished.json", ".subwatch-interrupted.tmp", "notes-old.txt", "custom-export.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -500,7 +485,7 @@ func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	if err := cleanOutputArtifacts(dir); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "speed-test-finished.json", ".subwatch-interrupted.tmp"} {
+	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt", "failed.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "speed-test-finished.json", ".subwatch-interrupted.tmp"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("generated artifact %s remains: %v", name, err)
 		}
@@ -518,11 +503,11 @@ func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 func TestClearProtocolSubscriptionsPreservesUnrelatedFiles(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{
-		"url-test-finished-vless.txt",
-		"url-test-finished-ss.txt",
+		"url-tested-vless.txt",
+		"url-tested-ss.txt",
 		"url-test-finished-personal-notes.txt",
 		"url-test-finished-vpn-backup.txt",
-		"speed-test-finished-vless.txt",
+		"speedtested-vless.txt",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
@@ -531,12 +516,12 @@ func TestClearProtocolSubscriptionsPreservesUnrelatedFiles(t *testing.T) {
 	if err := clearProtocolSubscriptions(dir, "url-test-finished"); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"url-test-finished-vless.txt", "url-test-finished-ss.txt"} {
+	for _, name := range []string{"url-tested-vless.txt", "url-tested-ss.txt"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("generated protocol file %s remains: %v", name, err)
 		}
 	}
-	for _, name := range []string{"url-test-finished-personal-notes.txt", "url-test-finished-vpn-backup.txt", "speed-test-finished-vless.txt"} {
+	for _, name := range []string{"url-test-finished-personal-notes.txt", "url-test-finished-vpn-backup.txt", "speedtested-vless.txt"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("unrelated file %s was removed: %v", name, err)
 		}
@@ -900,29 +885,20 @@ func TestFormatMbpsRoundsToWholeNumbers(t *testing.T) {
 }
 
 
-func TestInvalidConfigOutputIsWrittenAndCleanedBetweenRuns(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "invalid.txt")
-	lines := []string{
-		"vless://missing-port",
-		"unsupported://example.test:443",
+func TestInvalidConfigsAreIncludedInFailedReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "failed.txt")
+	failures := []failureRecord{
+		{Stage: "PARSE", URI: "vless://missing-port", Reason: "invalid or unsupported proxy configuration"},
+		{Stage: "PARSE", URI: "unsupported://example.test:443", Reason: "invalid or unsupported proxy configuration"},
 	}
-
-	if err := writeInvalidLines(path, lines); err != nil {
+	if err := writeFailureReport(path, "https://example.com/204", failures); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(data), strings.Join(lines, "\n")+"\n"; got != want {
-		t.Fatalf("invalid.txt=%q, want %q", got, want)
-	}
-	if err := cleanOutputArtifacts(dir); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("invalid.txt should be removed before the next run, stat err=%v", err)
+	report := string(mustRead(t, path))
+	for _, want := range []string{"PARSE", "vless://missing-port", "unsupported://example.test:443"} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("failed.txt missing %q: %s", want, report)
+		}
 	}
 }
 
@@ -1053,10 +1029,10 @@ func TestURLStageExportsCountryNameWithoutUnmeasuredSpeed(t *testing.T) {
 	node.URLPassed = true
 
 	dir := t.TempDir()
-	if err := writeStageFiles(dir, "url-test-finished", []sub.Node{node}, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", []sub.Node{node}, true); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "url-test-finished-vless.txt"))
+	data, err := os.ReadFile(filepath.Join(dir, "url-tested-vless.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1134,10 +1110,10 @@ func TestMeasuredNodeNamesRefreshAllAndURLLists(t *testing.T) {
 	if err := writeSubscription(filepath.Join(dir, "all.txt"), parsed); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", urlNodes, true); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "url-test-finished.txt", "url-test-finished-vless.txt"} {
+	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt"} {
 		data := string(mustRead(t, filepath.Join(dir, name)))
 		if !strings.Contains(data, "🇩🇪 Germany 72↓32↑") {
 			t.Fatalf("%s did not receive the measured name: %q", name, data)
@@ -1161,7 +1137,7 @@ func TestRunPreservesPreviousResultsWhenSourceListCannotBeRead(t *testing.T) {
 	}
 	previous := map[string]string{
 		"all.txt": "previous successful result\n",
-		"url-test-finished.txt": "previous passing nodes\n",
+		"url-tested.txt": "previous passing nodes\n",
 	}
 	for name, content := range previous {
 		if err := os.WriteFile(filepath.Join(outDir, name), []byte(content), 0600); err != nil {
