@@ -9,12 +9,36 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // uploadOutput sends the current user-facing output files over OpenSSH SFTP.
 // Password authentication uses sshpass when installed; key authentication uses
 // the system OpenSSH client and never copies private-key material to the server.
 func uploadOutput(ctx context.Context, opts RemoteUploadOptions, outDir string, stdout, stderr interface{ Write([]byte) (int, error) }) error {
+	if !opts.Enabled {
+		return nil
+	}
+	for attempt := 1; ; attempt++ {
+		err := uploadOutputOnce(ctx, opts, outDir, stdout, stderr)
+		if err == nil || !opts.RetryOnConnectionError || !isTransientNetworkError(err) || ctx.Err() != nil {
+			return err
+		}
+		fmt.Fprintf(stderr, "[UPLOAD] Temporary SSH/SFTP connection failure (attempt %d): %v\n", attempt, err)
+		fmt.Fprintln(stderr, "[UPLOAD] Retrying in 5s; press Ctrl+C to stop waiting")
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func uploadOutputOnce(ctx context.Context, opts RemoteUploadOptions, outDir string, stdout, stderr interface{ Write([]byte) (int, error) }) error {
 	if !opts.Enabled {
 		return nil
 	}
