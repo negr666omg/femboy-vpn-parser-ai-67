@@ -103,6 +103,10 @@ func (t *geminiTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	t.conns = append(t.conns, conn)
 	if conn.ConnectionState().NegotiatedProtocol == "h2" {
+		// HTTP/2 manages per-stream deadlines through request contexts; a
+		// socket-wide deadline would incorrectly kill later requests on this
+		// reusable connection.
+		_ = conn.SetDeadline(time.Time{})
 		cc, err := t.h2.NewClientConn(conn)
 		if err != nil {
 			_ = conn.Close()
@@ -187,7 +191,6 @@ func (t *geminiTransport) dialTLS(ctx context.Context, host, address string) (*u
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return fail(fmt.Errorf("Chrome TLS handshake: %w", err))
 	}
-	_ = tlsConn.SetDeadline(time.Time{})
 	return tlsConn, nil
 }
 
