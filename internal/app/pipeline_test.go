@@ -492,7 +492,7 @@ func TestRunStageCallbackRunsForEachCompletedNode(t *testing.T) {
 
 func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "notes-old.txt", "custom-export.json"} {
+	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "speed-test-finished.json", ".subwatch-interrupted.tmp", "notes-old.txt", "custom-export.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -500,7 +500,7 @@ func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	if err := cleanOutputArtifacts(dir); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
+	for _, name := range []string{"all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt", "speed-test-finished.json", ".subwatch-interrupted.tmp"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("generated artifact %s remains: %v", name, err)
 		}
