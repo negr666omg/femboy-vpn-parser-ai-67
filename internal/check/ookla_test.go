@@ -36,10 +36,18 @@ func TestOoklaSpeedTestAutomaticallySelectsFastestReachableServer(t *testing.T) 
 			fastDownloads.Add(1)
 			_, _ = io.WriteString(w, payload)
 		case "/slow/upload.php":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			slowUploads.Add(1)
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.WriteHeader(http.StatusNoContent)
 		case "/fast/upload.php":
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			fastUploads.Add(1)
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.WriteHeader(http.StatusNoContent)
