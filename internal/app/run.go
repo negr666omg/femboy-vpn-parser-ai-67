@@ -124,7 +124,7 @@ func isTransientNetworkError(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	for _, marker := range []string{
-		"i/o timeout", "timed out", "timeout", "deadline exceeded",
+		"i/o timeout", "unexpected eof", "server closed idle connection", "timed out", "timeout", "deadline exceeded",
 		"connection refused", "connection reset", "connection aborted",
 		"connection closed by remote host", "connection lost", "broken pipe",
 		"network is unreachable", "network is down", "no route to host",
@@ -556,7 +556,14 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
 	}
-	// Preserve the previous successful output if setup or source loading failed.
+	// Preserve the previous successful output if every remote source is
+	// temporarily unreachable. The CLI will retry this whole attempt.
+	if opts.RetryOnConnectionError && len(parsed) == 0 && allSourcesFailedWithTransientConnections(sources) {
+		return newRetryableConnectionError(
+			"all remote subscription sources are temporarily unreachable",
+			fmt.Errorf("no supported proxy nodes found (source failures: %d; check connectivity and retry)", sourceErrors),
+		)
+	}
 	// Once the current sources have been parsed, remove stale generated files
 	// immediately before writing this run's results.
 	if opts.StabilityState != nil {
