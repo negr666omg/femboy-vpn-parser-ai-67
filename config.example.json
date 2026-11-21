@@ -1,7 +1,8 @@
 {
   "network": {
     "interface": "auto",
-    "isolate_source_downloads": false
+    "isolate_source_downloads": false,
+    "retry_on_connection_error": false
   },
   "sources": {
     "file": "sources.txt",
