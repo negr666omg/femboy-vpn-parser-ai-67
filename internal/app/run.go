@@ -142,6 +142,16 @@ func isTransientNetworkError(err error) bool {
 	return false
 }
 
+func allSourcesUnavailableRetryError(retryEnabled bool, parsedCount int, sources []loadedSource) error {
+	if !retryEnabled || parsedCount != 0 || !allSourcesFailedWithTransientConnections(sources) {
+		return nil
+	}
+	return newRetryableConnectionError(
+		"all remote subscription sources are temporarily unreachable",
+		fmt.Errorf("no supported proxy nodes found after %d retries per source (source failures: %d; waiting for connectivity)", maxSourceDownloadRetries, len(sources)),
+	)
+}
+
 func allSourcesFailedWithTransientConnections(sources []loadedSource) bool {
 	if len(sources) == 0 {
 		return false
@@ -557,10 +567,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
 	}
-	// Preserve previous output if every remote source remained unreachable
-	// after its bounded retries. Do not restart the whole cycle indefinitely.
-	if opts.RetryOnConnectionError && len(parsed) == 0 && allSourcesFailedWithTransientConnections(sources) {
-		return fmt.Errorf("all remote subscription sources remained unreachable after %d retries; previous output was preserved", maxSourceDownloadRetries)
+	// Keep waiting for connectivity if every remote source exhausted its
+	// per-source retries. The CLI retries this attempt after 5 seconds; outputs
+	// are left untouched until at least one source can be loaded and parsed.
+	if retryErr := allSourcesUnavailableRetryError(opts.RetryOnConnectionError, len(parsed), sources); retryErr != nil {
+		return retryErr
 	}
 	// Once the current sources have been parsed, remove stale generated files
 	// immediately before writing this run's results.
