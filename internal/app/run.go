@@ -1692,7 +1692,12 @@ const geminiNameSuffix = " Gemini 🐱"
 // When disabled, it marks those nodes and refreshes every earlier stage list so
 // the marker is present wherever the same node appears.
 func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes []sub.Node, separateFile bool) error {
+	if err := markGeminiNodes(geminiNodes); err != nil {
+		return err
+	}
 	if separateFile {
+		// Keep the dedicated Gemini list's URI remarks consistent with the
+		// marked names used in the combined lists.
 		return writeStageFiles(dir, "gemini", geminiNodes, true)
 	}
 	if err := os.Remove(filepath.Join(dir, "gemini.txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1702,7 +1707,6 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 		return err
 	}
 
-	markGeminiNodes(geminiNodes)
 	for _, group := range [][]sub.Node{allNodes, urlNodes, speedNodes} {
 		applyNodeUpdatesByIdentity(group, geminiNodes)
 	}
@@ -1715,7 +1719,7 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 	return writeStageFiles(dir, "speed-test-finished", speedNodes, true)
 }
 
-func markGeminiNodes(nodes []sub.Node) {
+func markGeminiNodes(nodes []sub.Node) error {
 	for i := range nodes {
 		if !geminiAvailable(nodes[i]) {
 			continue
@@ -1727,11 +1731,11 @@ func markGeminiNodes(nodes []sub.Node) {
 		if name == "" {
 			name = nodes[i].Protocol
 		}
-		if nodes[i].Outbound == nil {
-			nodes[i].Outbound = make(map[string]any)
+		if err := sub.RenameNode(&nodes[i], name+geminiNameSuffix); err != nil {
+			return fmt.Errorf("rename Gemini node %s: %w", nodes[i].Protocol, err)
 		}
-		sub.RenameNode(&nodes[i], name+geminiNameSuffix)
 	}
+	return nil
 }
 
 func applyNodeUpdatesByIdentity(nodes, updates []sub.Node) {
