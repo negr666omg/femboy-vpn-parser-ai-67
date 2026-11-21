@@ -119,7 +119,7 @@ func TestWriteFailureReportCombinesAllFailureStages(t *testing.T) {
 	failures := []failureRecord{
 		{Stage: "SOURCE", Reason: "source 2 (subscription): timeout"},
 		{Stage: "PARSE", URI: "broken://not-a-proxy", Reason: "invalid or unsupported proxy configuration"},
-		{Stage: "URL TEST", Name: "Germany node", Protocol: "vmess", URI: "vmess://uuid@example.test:443", Reason: "start proxy: connection refused"},
+		{Stage: "URL TEST", Name: "Germany node", Protocol: "vmess", URI: "vmess://uuid@example.test:443", Reason: "start proxy: connection refused", LatencyMS: 8123},
 		{Stage: "SPEED TEST", Name: "US node", Protocol: "vless", URI: "vless://uuid@example.org:443", Reason: "download 4 < 8 Mbps"},
 		{Stage: "SERVICE CHECK", Name: "Japan node", Protocol: "trojan", URI: "trojan://secret@example.net:443", Reason: "Gemini status: unavailable"},
 		{Stage: "RENAME", Name: "France node", Protocol: "ss", URI: "ss://node", Reason: "GeoIP country lookup failed"},
@@ -130,7 +130,7 @@ func TestWriteFailureReportCombinesAllFailureStages(t *testing.T) {
 	report := string(mustRead(t, path))
 	for _, want := range []string{
 		"Total issues: 6", "[1] SOURCE", "[2] PARSE", "broken://not-a-proxy",
-		"[3] URL TEST — Germany node (vmess)", "connection refused",
+		"[3] URL TEST — Germany node (vmess)", "connection refused", "Latency: 8123 ms",
 		"[4] SPEED TEST — US node (vless)", "download 4 < 8 Mbps",
 		"[5] SERVICE CHECK — Japan node (trojan)", "Gemini status: unavailable",
 		"[6] RENAME — France node (ss)", "GeoIP country lookup failed",
