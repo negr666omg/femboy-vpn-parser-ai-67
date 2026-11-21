@@ -42,7 +42,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if opts.URLConcurrency != 6 || opts.SpeedConcurrency != 3 || opts.ServiceConcurrency != 2 {
 		t.Fatalf("unexpected concurrency: %+v", opts)
 	}
-	if opts.SourceTimeout != 90*time.Second || opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second || opts.FirstByteTimeout != 6*time.Second || opts.MaxSpeedDuration != 17*time.Second || opts.SpeedSampleInterval != 500*time.Millisecond {
+	if opts.SourceTimeout != 90*time.Second || opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second || opts.FirstByteTimeout != 0 || opts.MaxSpeedDuration != 17*time.Second || opts.SpeedSampleInterval != 0 {
 		t.Fatalf("unexpected timeouts: %+v", opts)
 	}
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
@@ -52,8 +52,8 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
 	if opts.SpeedProvider != "ookla" { t.Fatalf("speed provider = %q, want ookla", opts.SpeedProvider) }
-	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
-		t.Fatalf("custom speed-test settings were not loaded: %+v", opts)
+	if opts.DownloadBytes != 0 || opts.UploadBytes != 0 || opts.SpeedDownloadURL != "" || opts.SpeedUploadURL != "" {
+		t.Fatalf("Cloudflare-only settings must be disabled for Ookla: %+v", opts)
 	}
 }
 
@@ -856,5 +856,87 @@ func TestInvalidSpeedTestProviderIsRejected(t *testing.T) {
 	}
 	if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "speed_test.provider") {
 		t.Fatalf("expected speed_test.provider validation error, got %v", err)
+	}
+}
+
+
+func TestOoklaIgnoresCloudflareOnlyConfigFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	data := `{"speed_test":{"provider":"ookla","timeout":"70s","max_duration":"18s","first_byte_timeout":"not-a-duration","sample_interval":"also-invalid","download_bytes":-10,"upload_bytes":-20,"download_url":"https://ignored.example/down","upload_url":"https://ignored.example/up","min_download_mbps":6,"min_upload_mbps":3}}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := LoadOptions(path)
+	if err != nil {
+		t.Fatalf("Ookla must ignore Cloudflare-only settings: %v", err)
+	}
+	if opts.SpeedProvider != "ookla" || opts.SpeedTimeout != 70*time.Second || opts.MaxSpeedDuration != 18*time.Second {
+		t.Fatalf("common Ookla settings were not retained: %+v", opts)
+	}
+	if opts.FirstByteTimeout != 0 || opts.SpeedSampleInterval != 0 || opts.DownloadBytes != 0 || opts.UploadBytes != 0 || opts.SpeedDownloadURL != "" || opts.SpeedUploadURL != "" {
+		t.Fatalf("Cloudflare-only settings were not disabled: %+v", opts)
+	}
+	if opts.MinDownload != 6 || opts.MinUpload != 3 {
+		t.Fatalf("shared speed thresholds were lost: %.1f/%.1f", opts.MinDownload, opts.MinUpload)
+	}
+}
+
+func TestCloudflareKeepsProviderSpecificConfigFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	data := `{"speed_test":{"provider":"cloudflare","first_byte_timeout":"7s","sample_interval":"300ms","download_bytes":1048576,"upload_bytes":524288,"download_url":"https://down.example/{bytes}","upload_url":"https://up.example/test"}}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := LoadOptions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.FirstByteTimeout != 7*time.Second || opts.SpeedSampleInterval != 300*time.Millisecond {
+		t.Fatalf("Cloudflare timings were not loaded: %+v", opts)
+	}
+	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://down.example/{bytes}" || opts.SpeedUploadURL != "https://up.example/test" {
+		t.Fatalf("Cloudflare payload settings were not loaded: %+v", opts)
+	}
+}
+
+func TestURLStageExportsCountryNameWithoutUnmeasuredSpeed(t *testing.T) {
+	node, err := sub.ParseURI("vless://11111111-1111-4111-8111-111111111111@example.test:443#original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := urlStageNodeName("DE")
+	if name != "🇩🇪" {
+		t.Fatalf("URL-stage name = %q, want country flag only", name)
+	}
+	sub.RenameNode(&node, name)
+	node.URLPassed = true
+
+	dir := t.TempDir()
+	if err := writeStageFiles(dir, "url-test-finished", []sub.Node{node}, true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "url-test-finished-vless.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, err := sub.ParseURI(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse exported URL-stage subscription: %v", err)
+	}
+	if exported.Name != "🇩🇪" {
+		t.Fatalf("exported URL-stage name = %q", exported.Name)
+	}
+	if strings.Contains(exported.Name, "↓") || strings.Contains(exported.Name, "↑") {
+		t.Fatalf("URL-stage name contains speed that has not been measured: %q", exported.Name)
+	}
+}
+
+func TestURLLiveDetailReportsRenameFailureSeparately(t *testing.T) {
+	node := sub.Node{URLPassed: true, RenameError: "GeoIP country lookup failed"}
+	got := urlLiveDetail(node)
+	if !strings.Contains(got, "URL: PASS") || !strings.Contains(got, "rename: GeoIP country lookup failed") {
+		t.Fatalf("unexpected URL live detail: %q", got)
 	}
 }
