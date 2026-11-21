@@ -33,7 +33,6 @@ type Options struct {
 	RenameNodes        bool
 	GeoIPURL           string
 	NameFormat         string
-	SpeedDecimals      int
 	ServiceTimeout     time.Duration
 	URL                string
 	SpeedDownloadURL   string
@@ -42,8 +41,6 @@ type Options struct {
 	UploadBytes        int64
 	MinDownload        float64
 	MinUpload          float64
-	SplitByProtocol    bool
-	WriteText          bool
 	LookupIP           bool
 	RemoteUpload       RemoteUploadOptions
 }
@@ -99,7 +96,6 @@ type fileConfig struct {
 		RenameNodes *bool `json:"rename_nodes"`
 		GeoIPURL string `json:"geoip_url"`
 		NameFormat string `json:"name_format"`
-		SpeedDecimals *int `json:"speed_decimals"`
 	} `json:"service_check"`
 	RemoteUpload struct {
 		Enabled         bool   `json:"enabled"`
@@ -115,8 +111,6 @@ type fileConfig struct {
 	} `json:"remote_upload"`
 	Output struct {
 		Directory        string `json:"directory"`
-		SplitByProtocol  bool   `json:"split_by_protocol"`
-		SubscriptionText *bool  `json:"subscription_text"`
 		GeminiFile       *bool  `json:"gemini_file"`
 	} `json:"output"`
 }
@@ -128,13 +122,13 @@ func DefaultOptions() Options {
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4, SpeedProvider: "cloudflare",
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
 		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
-		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {country} {download}↓{upload}↑", SpeedDecimals: 1,
+		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {country} {download}↓{upload}↑",
 		ServiceTimeout:   25 * time.Second,
 		URL:              "https://www.gstatic.com/generate_204",
 		SpeedDownloadURL: "https://speed.cloudflare.com/__down?bytes={bytes}",
 		SpeedUploadURL:   "https://speed.cloudflare.com/__up",
 		DownloadBytes:    2 << 20, UploadBytes: 2 << 20,
-		MinDownload: 8, MinUpload: 8, WriteText: true,
+		MinDownload: 8, MinUpload: 8,
 	}
 }
 
@@ -275,7 +269,6 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.ServiceCheck.GeoIPURL != "" { opts.GeoIPURL = cfg.ServiceCheck.GeoIPURL }
 	if cfg.ServiceCheck.NameFormat != "" { opts.NameFormat = cfg.ServiceCheck.NameFormat }
 	if opts.NameFormat != "" && !strings.Contains(opts.NameFormat, "{flag}") && !strings.Contains(opts.NameFormat, "{country}") && !strings.Contains(opts.NameFormat, "{download}") && !strings.Contains(opts.NameFormat, "{upload}") { return opts, fmt.Errorf("service_check.name_format must include {flag}, {country}, {download}, or {upload}") }
-	if cfg.ServiceCheck.SpeedDecimals != nil { if *cfg.ServiceCheck.SpeedDecimals < 0 || *cfg.ServiceCheck.SpeedDecimals > 3 { return opts, fmt.Errorf("service_check.speed_decimals must be between 0 and 3") }; opts.SpeedDecimals = *cfg.ServiceCheck.SpeedDecimals }
 	if cfg.RemoteUpload.Enabled {
 		r := cfg.RemoteUpload
 		if r.Method == "" {
@@ -311,10 +304,6 @@ func LoadOptions(path string) (Options, error) {
 	}
 	if cfg.Output.Directory != "" {
 		opts.OutDir = cfg.Output.Directory
-	}
-	opts.SplitByProtocol = cfg.Output.SplitByProtocol
-	if cfg.Output.SubscriptionText != nil {
-		opts.WriteText = *cfg.Output.SubscriptionText
 	}
 	if cfg.Output.GeminiFile != nil {
 		opts.GeminiFile = *cfg.Output.GeminiFile
@@ -410,24 +399,21 @@ func ExampleConfig() string {
     "rename_nodes": true,
     "geoip_url": "https://ipwho.is/",
     "name_format": "{flag} {country} {download}↓{upload}↑",
-    "speed_decimals": 1
   },
   "output": {
     "directory": "out",
-    "split_by_protocol": true,
-    "subscription_text": true,
     "gemini_file": true
   },
   "remote_upload": {
     "enabled": false,
     "method": "sftp",
-    "host": "79.72.16.241",
+    "host": "example.com",
     "port": 22,
     "username": "ubuntu",
     "auth": "private_key",
     "private_key": "~/.ssh/id_ed25519",
     "password": "",
-    "remote_directory": "/home/ubuntu/oklol/pidarasy",
+    "remote_directory": "/home/ubuntu/subwatch/out",
     "interface": ""
   }
 }
