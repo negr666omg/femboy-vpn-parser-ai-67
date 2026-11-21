@@ -127,7 +127,7 @@ func DefaultOptions() Options {
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4, SpeedProvider: "cloudflare",
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
 		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
-		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {download}↓{upload}↑", SpeedDecimals: 1,
+		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {country} {download}↓{upload}↑", SpeedDecimals: 1,
 		ServiceTimeout:   25 * time.Second,
 		URL:              "https://www.gstatic.com/generate_204",
 		SpeedDownloadURL: "https://speed.cloudflare.com/__down?bytes={bytes}",
@@ -273,7 +273,7 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.ServiceCheck.RenameNodes != nil { opts.RenameNodes = *cfg.ServiceCheck.RenameNodes }
 	if cfg.ServiceCheck.GeoIPURL != "" { opts.GeoIPURL = cfg.ServiceCheck.GeoIPURL }
 	if cfg.ServiceCheck.NameFormat != "" { opts.NameFormat = cfg.ServiceCheck.NameFormat }
-	if opts.NameFormat != "" && !strings.Contains(opts.NameFormat, "{flag}") && !strings.Contains(opts.NameFormat, "{download}") && !strings.Contains(opts.NameFormat, "{upload}") { return opts, fmt.Errorf("service_check.name_format must include {flag}, {download}, or {upload}") }
+	if opts.NameFormat != "" && !strings.Contains(opts.NameFormat, "{flag}") && !strings.Contains(opts.NameFormat, "{country}") && !strings.Contains(opts.NameFormat, "{download}") && !strings.Contains(opts.NameFormat, "{upload}") { return opts, fmt.Errorf("service_check.name_format must include {flag}, {country}, {download}, or {upload}") }
 	if cfg.ServiceCheck.SpeedDecimals != nil { if *cfg.ServiceCheck.SpeedDecimals < 0 || *cfg.ServiceCheck.SpeedDecimals > 3 { return opts, fmt.Errorf("service_check.speed_decimals must be between 0 and 3") }; opts.SpeedDecimals = *cfg.ServiceCheck.SpeedDecimals }
 	if cfg.RemoteUpload.Enabled {
 		r := cfg.RemoteUpload
@@ -408,7 +408,7 @@ func ExampleConfig() string {
     "lookup_ip": false,
     "rename_nodes": true,
     "geoip_url": "https://ipwho.is/",
-    "name_format": "{flag} {download}↓{upload}↑",
+    "name_format": "{flag} {country} {download}↓{upload}↑",
     "speed_decimals": 1
   },
   "output": {
