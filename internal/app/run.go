@@ -101,6 +101,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.Interface == "" {
 		opts.Interface = "auto"
 	}
+	if opts.IsolateSourceDownloads && opts.Interface == "auto" {
+		return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
+	}
 	if opts.Interface != "auto" {
 		it, err := net.InterfaceByName(opts.Interface)
 		if err != nil {
