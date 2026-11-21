@@ -256,6 +256,8 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		})
 		invalid += bad
 		if parseErr != nil {
+			progress.Phase = "parse failed"
+			renderSourceProgress(progress)
 			sourceErrors++
 			lineNo := source.Line
 			if lineNo < 1 {
@@ -670,8 +672,12 @@ func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string
 		head = fmt.Sprintf("[PARSE %d/%d ok:%d skip:%d]", progress.Index, progress.Total, progress.Loaded, progress.Skipped)
 	}
 	detail := cleanLiveText(progress.Phase)
-	if progress.Phase == "parsing" {
-		detail = fmt.Sprintf("lines %d/%d | nodes %d | bad %d", progress.LinesProcessed, progress.TotalLines, progress.Nodes, progress.Invalid)
+	if progress.Phase == "parsing" || progress.Phase == "parsed" {
+		verb := "lines"
+		if progress.Phase == "parsed" {
+			verb = "parsed"
+		}
+		detail = fmt.Sprintf("%s %d/%d | nodes %d | bad %d", verb, progress.LinesProcessed, progress.TotalLines, progress.Nodes, progress.Invalid)
 	}
 	line := strings.TrimSpace(head + " | " + identity + " | " + detail)
 	if terminalWidth > 0 {
