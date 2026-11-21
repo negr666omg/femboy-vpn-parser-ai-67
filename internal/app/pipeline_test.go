@@ -20,7 +20,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	data := `{
-  "network":{"interface":"throne-tun"},
+  "network":{"interface":"throne-tun","isolate_source_downloads":true},
   "sources":{"file":"subs.txt"},
   "protocols":{"enabled":["vless","shadowsocks"]},
   "url_test":{"url":"https://example.com/204","concurrency":6,"timeout":"9s"},
@@ -36,7 +36,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.Interface != "throne-tun" || filepath.Base(opts.Sources) != "subs.txt" || filepath.Dir(opts.Sources) != dir || opts.OutDir != "results" {
+	if opts.Interface != "throne-tun" || !opts.IsolateSourceDownloads || filepath.Base(opts.Sources) != "subs.txt" || filepath.Dir(opts.Sources) != dir || opts.OutDir != "results" {
 		t.Fatalf("unexpected paths/network: %+v", opts)
 	}
 	if opts.URLConcurrency != 6 || opts.SpeedConcurrency != 3 || opts.ServiceConcurrency != 2 {
@@ -53,6 +53,22 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	}
 	if opts.DownloadBytes != 1048576 || opts.UploadBytes != 524288 || opts.SpeedDownloadURL != "https://download.example/file?size={bytes}" || opts.SpeedUploadURL != "https://upload.example/test" {
 		t.Fatalf("custom speed-test settings were not loaded: %+v", opts)
+	}
+}
+
+func TestIsolatedSourceDownloadsRequireExplicitInterface(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"network":{"isolate_source_downloads":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := LoadOptions(path)
+	if err != nil {
+		t.Fatalf("the config should load before CLI overrides are applied: %v", err)
+	}
+	opts.OutDir = filepath.Join(dir, "out")
+	if err := Run(context.Background(), opts, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "network.interface") {
+		t.Fatalf("expected explicit interface validation error at run time, got %v", err)
 	}
 }
 
@@ -358,6 +374,37 @@ func TestLoadSourcesSkipsTimedOutSubscriptionAndContinues(t *testing.T) {
 	}
 	if got := string(sources[1].Body); got != "vless://working@example.test:443" {
 		t.Fatalf("unexpected body from source after timeout: %q", got)
+	}
+}
+
+func TestLoadSourcesWithFetcherUsesNamespaceFetcherOnlyForRemoteURLs(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "local.txt")
+	if err := os.WriteFile(localPath, []byte("ss://local-source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sourcesPath := filepath.Join(dir, "sources.txt")
+	contents := "https://subscription.example/list\n" + localPath + "\nvless://inline@example.test:443\n"
+	if err := os.WriteFile(sourcesPath, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var calls []string
+	fetcher := func(_ context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+		calls = append(calls, sourceURL)
+		if timeout != 5*time.Second {
+			t.Fatalf("fetch timeout = %s, want 5s", timeout)
+		}
+		return []byte("vless://remote@example.test:443"), nil
+	}
+	sources, err := loadSourcesWithFetcher(context.Background(), sourcesPath, 5*time.Second, fetcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 3 || len(calls) != 1 || calls[0] != "https://subscription.example/list" {
+		t.Fatalf("unexpected fetch calls or sources: calls=%#v sources=%#v", calls, sources)
+	}
+	if string(sources[0].Body) != "vless://remote@example.test:443" || string(sources[1].Body) != "ss://local-source" || string(sources[2].Body) != "vless://inline@example.test:443" {
+		t.Fatalf("source bodies were not loaded correctly: %#v", sources)
 	}
 }
 

@@ -14,6 +14,7 @@ type Options struct {
 	Sources            string
 	OutDir             string
 	Interface          string
+	IsolateSourceDownloads bool
 	NetworkNamespace   string
 	CorePath           string
 	Protocols          []string
@@ -58,7 +59,8 @@ type RemoteUploadOptions struct {
 
 type fileConfig struct {
 	Network struct {
-		Interface string `json:"interface"`
+		Interface              string `json:"interface"`
+		IsolateSourceDownloads bool   `json:"isolate_source_downloads"`
 	} `json:"network"`
 	Sources struct {
 		File string `json:"file"`
@@ -151,6 +153,7 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.Network.Interface != "" {
 		opts.Interface = cfg.Network.Interface
 	}
+	opts.IsolateSourceDownloads = cfg.Network.IsolateSourceDownloads
 	if cfg.Sources.File != "" {
 		opts.Sources = cfg.Sources.File
 	}
@@ -319,7 +322,8 @@ func normalizeProtocols(protocols []string) []string {
 func ExampleConfig() string {
 	return `{
   "network": {
-    "interface": "auto"
+    "interface": "auto",
+    "isolate_source_downloads": false
   },
   "sources": {
     "file": "sources.txt"

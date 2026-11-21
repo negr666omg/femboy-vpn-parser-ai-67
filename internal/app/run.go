@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -100,6 +101,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.Interface == "" {
 		opts.Interface = "auto"
 	}
+	if opts.IsolateSourceDownloads && opts.Interface == "auto" {
+		return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
+	}
 	if opts.Interface != "auto" {
 		it, err := net.InterfaceByName(opts.Interface)
 		if err != nil {
@@ -156,8 +160,41 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return fmt.Errorf("clean output directory: %w", err)
 	}
 
+	// When explicitly enabled, create the namespace before loading remote source
+	// URLs. The source list and local files remain host filesystem operations;
+	// only HTTP(S) subscription downloads are executed inside this namespace.
+	var sourceNamespace *core.NetworkNamespace
+	if opts.IsolateSourceDownloads {
+		if opts.Interface == "auto" {
+			return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
+		}
+		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
+		if nsErr != nil {
+			return fmt.Errorf("prepare isolated source network: %w", nsErr)
+		}
+		if ns == nil {
+			return fmt.Errorf("isolated source network was not created")
+		}
+		sourceNamespace = ns
+		opts.NetworkNamespace = ns.Name
+		defer sourceNamespace.Close()
+		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
+	}
+
 	fmt.Fprintf(stdout, "[1/4] PARSE: reading %s\n", opts.Sources)
-	sources, err := loadSources(ctx, opts.Sources)
+	var sources []loadedSource
+	var err error
+	if sourceNamespace != nil {
+		executable, exeErr := os.Executable()
+		if exeErr != nil {
+			return fmt.Errorf("locate SubWatch executable for isolated source downloads: %w", exeErr)
+		}
+		sources, err = loadSourcesWithFetcher(ctx, opts.Sources, sourceDownloadTimeout, func(fetchCtx context.Context, sourceURL string, _ time.Duration) ([]byte, error) {
+			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL)
+		})
+	} else {
+		sources, err = loadSources(ctx, opts.Sources)
+	}
 	if err != nil {
 		return err
 	}
@@ -231,7 +268,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	opts.CorePath = corePath
 	fmt.Fprintf(stdout, "[prepare] sing-box ready: %s\n", corePath)
-	if opts.Interface != "auto" {
+	if opts.Interface != "auto" && opts.NetworkNamespace == "" {
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
 		if nsErr != nil { return fmt.Errorf("prepare isolated network: %w", nsErr) }
 		if ns != nil { defer ns.Close(); opts.NetworkNamespace = ns.Name }
@@ -368,7 +405,16 @@ func loadSources(ctx context.Context, path string) ([]loadedSource, error) {
 // loadSourcesWithTimeout treats a failing subscription as an isolated source
 // failure. A timeout or HTTP error skips that entry and continues loading the
 // remaining sources. Only cancellation of the whole run aborts the operation.
+type sourceFetcher func(context.Context, string, time.Duration) ([]byte, error)
+
 func loadSourcesWithTimeout(ctx context.Context, path string, timeout time.Duration) ([]loadedSource, error) {
+	return loadSourcesWithFetcher(ctx, path, timeout, fetchHTTPSource)
+}
+
+func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher) ([]loadedSource, error) {
+	if fetch == nil {
+		fetch = fetchHTTPSource
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -377,7 +423,6 @@ func loadSourcesWithTimeout(ctx context.Context, path string, timeout time.Durat
 		return nil, fmt.Errorf("%s exceeds 2 MiB", path)
 	}
 	var sources []loadedSource
-	client := &http.Client{Timeout: timeout}
 	for lineNo, line := range strings.Split(string(data), "\n") {
 		if err := ctx.Err(); err != nil {
 			return sources, err
@@ -394,35 +439,12 @@ func loadSourcesWithTimeout(ctx context.Context, path string, timeout time.Durat
 				sources = append(sources, source)
 				continue
 			}
-			req, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, entry, nil)
-			if requestErr != nil {
-				source.LoadError = fmt.Errorf("create request: %w", requestErr)
-				sources = append(sources, source)
-				continue
-			}
-			req.Header.Set("User-Agent", "SubWatch/0.3.7")
-			resp, requestErr := client.Do(req)
-			if requestErr != nil {
+			body, fetchErr := fetch(ctx, entry, timeout)
+			if fetchErr != nil {
 				if ctx.Err() != nil {
 					return sources, ctx.Err()
 				}
-				source.LoadError = fmt.Errorf("download failed: %w", requestErr)
-				sources = append(sources, source)
-				continue
-			}
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
-			closeErr := resp.Body.Close()
-			if readErr != nil {
-				if ctx.Err() != nil {
-					return sources, ctx.Err()
-				}
-				source.LoadError = fmt.Errorf("read response: %w", readErr)
-			} else if len(body) > 8<<20 {
-				source.LoadError = fmt.Errorf("subscription exceeds 8 MiB")
-			} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				source.LoadError = fmt.Errorf("server returned HTTP %d", resp.StatusCode)
-			} else if closeErr != nil {
-				source.LoadError = fmt.Errorf("close response: %w", closeErr)
+				source.LoadError = fmt.Errorf("download failed: %w", fetchErr)
 			} else {
 				source.Body = body
 			}
@@ -442,6 +464,92 @@ func loadSourcesWithTimeout(ctx context.Context, path string, timeout time.Durat
 		return nil, fmt.Errorf("%s contains no sources", path)
 	}
 	return sources, nil
+}
+
+func fetchHTTPSource(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+	return fetchHTTPSourceWithProxy(ctx, sourceURL, timeout, true)
+}
+
+// fetchHTTPSourceDirect deliberately ignores HTTP_PROXY/HTTPS_PROXY inherited
+// from the host: an isolated source download must use the namespace's own route.
+func fetchHTTPSourceDirect(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+	return fetchHTTPSourceWithProxy(ctx, sourceURL, timeout, false)
+}
+
+func fetchHTTPSourceWithProxy(ctx context.Context, sourceURL string, timeout time.Duration, useEnvironmentProxy bool) ([]byte, error) {
+	if timeout <= 0 {
+		timeout = sourceDownloadTimeout
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("User-Agent", "SubWatch/0.3.9")
+	client := &http.Client{Timeout: timeout}
+	if !useEnvironmentProxy {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		client.Transport = transport
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("server returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if len(body) > 8<<20 {
+		return nil, fmt.Errorf("subscription exceeds 8 MiB")
+	}
+	return body, nil
+}
+
+func fetchSourceInNamespace(ctx context.Context, namespace *core.NetworkNamespace, executable, sourceURL string) ([]byte, error) {
+	cmd := namespace.Command(ctx, executable, "__fetch-source")
+	cmd.Stdin = strings.NewReader(sourceURL + "\n")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	body, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return nil, fmt.Errorf("isolated source downloader: %w: %s", err, detail)
+		}
+		return nil, fmt.Errorf("isolated source downloader: %w", err)
+	}
+	if len(body) > 8<<20 {
+		return nil, fmt.Errorf("isolated source response exceeds 8 MiB")
+	}
+	return body, nil
+}
+
+// FetchSourceCommand is an internal entry point invoked by the parent process
+// through ip netns exec. The URL is read from stdin so credentials are not
+// copied into the helper process command line.
+func FetchSourceCommand() error {
+	input, err := io.ReadAll(io.LimitReader(os.Stdin, 4097))
+	if err != nil {
+		return fmt.Errorf("read source URL: %w", err)
+	}
+	if len(input) > 4096 {
+		return fmt.Errorf("source URL is too long")
+	}
+	sourceURL := strings.TrimSpace(string(input))
+	parsed, err := url.Parse(sourceURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("invalid HTTP(S) source URL")
+	}
+	body, err := fetchHTTPSourceDirect(context.Background(), sourceURL, sourceDownloadTimeout)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(body)
+	return err
 }
 
 func collectMetadata(sources [][]byte) []string {

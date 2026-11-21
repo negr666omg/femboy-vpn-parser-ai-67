@@ -16,7 +16,7 @@ import (
 	"github.com/negr666omg/subwatch/internal/app"
 )
 
-const version = "0.3.8"
+const version = "0.3.9"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -48,6 +48,11 @@ func run(args []string) error {
 		}
 		fmt.Printf("Initialized %s (sources.txt, config.json)\n", strings.TrimRight(*dir, "/"))
 		return nil
+	case "__fetch-source":
+		if len(args) != 0 {
+			return fmt.Errorf("__fetch-source does not accept arguments")
+		}
+		return app.FetchSourceCommand()
 	case "interfaces":
 		if len(args) > 0 {
 			return fmt.Errorf("interfaces does not accept options")
