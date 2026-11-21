@@ -25,6 +25,11 @@ type NetworkNamespace struct {
 	dhcpPID    string
 	dhcpLease  string
 	resolvDir  string
+	namespaceCreated bool
+	hostVethCreated bool
+	macvlanCreated bool
+	dhcpAttempted bool
+	resolvDirCreated bool
 }
 
 func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*NetworkNamespace, error) {
@@ -63,13 +68,17 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	}
 	run := func(args ...string) error { return ns.root(ctx, args...) }
 	if err := run("ip", "netns", "add", ns.Name); err != nil { return fail(fmt.Errorf("create network namespace: %w", err)) }
-	if err := run("install", "-d", "-m", "755", ns.resolvDir); err != nil { return fail(fmt.Errorf("prepare isolated DNS: %w", err)) }
+	ns.namespaceCreated = true
+	if err := run("install", "-d", "-m", "755", "/etc/netns"); err != nil { return fail(fmt.Errorf("prepare isolated DNS directory: %w", err)) }
+	if err := run("mkdir", "-m", "755", ns.resolvDir); err != nil { return fail(fmt.Errorf("prepare isolated DNS: %w", err)) }
+	ns.resolvDirCreated = true
 	resolv := filepath.Join(ns.resolvDir, "resolv.conf")
 	if err := run("sh", "-c", "printf 'nameserver 1.1.1.1\\nnameserver 9.9.9.9\\n' > "+shellQuote(resolv)); err != nil {
 		return fail(fmt.Errorf("prepare isolated DNS: %w", err))
 	}
 	peer := fmt.Sprintf("swn%d", os.Getpid()%1000000)
 	if err := run("ip", "link", "add", ns.hostVeth, "type", "veth", "peer", "name", peer); err != nil { return fail(fmt.Errorf("create local proxy link: %w", err)) }
+	ns.hostVethCreated = true
 	if err := run("ip", "link", "set", peer, "netns", ns.Name); err != nil { return fail(fmt.Errorf("move proxy link into namespace: %w", err)) }
 	if err := run("ip", "addr", "add", "10.254.0.1/30", "dev", ns.hostVeth); err != nil { return fail(fmt.Errorf("configure host proxy link: %w", err)) }
 	if err := run("ip", "link", "set", ns.hostVeth, "up"); err != nil { return fail(err) }
@@ -81,8 +90,10 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	if err := run("ip", "link", "add", "link", iface, "name", ns.macvlan, "type", "macvlan", "mode", "bridge"); err != nil {
 		return fail(fmt.Errorf("cannot create isolated link on %s (the network adapter or Wi-Fi may not support an additional MAC address): %w", iface, err))
 	}
+	ns.macvlanCreated = true
 	if err := run("ip", "link", "set", ns.macvlan, "netns", ns.Name); err != nil { return fail(fmt.Errorf("move isolated interface into namespace: %w", err)) }
 	if err := run("ip", "-n", ns.Name, "link", "set", ns.macvlan, "up"); err != nil { return fail(err) }
+	ns.dhcpAttempted = true
 	if err := run("ip", "netns", "exec", ns.Name, "dhclient", "-4", "-1", "-v", "-pf", ns.dhcpPID, "-lf", ns.dhcpLease, ns.macvlan); err != nil {
 		return fail(fmt.Errorf("DHCP did not obtain an address through %s; check that the network permits a second device/MAC: %w", iface, err))
 	}
@@ -138,18 +149,30 @@ func (n *NetworkNamespace) Close() {
 	if n == nil { return }
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// Release the DHCP lease first, then remove the macvlan wherever it ended up.
-	_ = n.root(ctx, "ip", "netns", "exec", n.Name, "dhclient", "-r", "-pf", n.dhcpPID)
-	if n.macvlan != "" {
-		// The first deletion handles a successfully moved link; the second
-		// handles the partial-setup case where moving it into the namespace failed.
-		_ = n.root(ctx, "ip", "-n", n.Name, "link", "del", n.macvlan)
+	// Release only resources this instance successfully created. This avoids
+	// deleting a pre-existing link or namespace when setup fails due to a name
+	// collision, and also handles a macvlan that was created but not moved.
+	if n.dhcpAttempted && n.namespaceCreated {
+		_ = n.root(ctx, "ip", "netns", "exec", n.Name, "dhclient", "-r", "-pf", n.dhcpPID)
+	}
+	if n.macvlanCreated {
+		if n.namespaceCreated {
+			_ = n.root(ctx, "ip", "-n", n.Name, "link", "del", n.macvlan)
+		}
 		_ = n.root(ctx, "ip", "link", "del", n.macvlan)
 	}
-	_ = n.root(ctx, "ip", "netns", "del", n.Name)
-	_ = n.root(ctx, "ip", "link", "del", n.hostVeth)
-	_ = n.root(ctx, "rm", "-f", n.dhcpPID, n.dhcpLease)
-	_ = n.root(ctx, "rm", "-rf", n.resolvDir)
+	if n.namespaceCreated {
+		_ = n.root(ctx, "ip", "netns", "del", n.Name)
+	}
+	if n.hostVethCreated {
+		_ = n.root(ctx, "ip", "link", "del", n.hostVeth)
+	}
+	if n.dhcpAttempted {
+		_ = n.root(ctx, "rm", "-f", n.dhcpPID, n.dhcpLease)
+	}
+	if n.resolvDirCreated {
+		_ = n.root(ctx, "rm", "-rf", n.resolvDir)
+	}
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
