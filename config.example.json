@@ -34,7 +34,7 @@
     "lookup_ip": false,
     "rename_nodes": true,
     "geoip_url": "https://ipwho.is/",
-    "name_format": "{flag} {download}↓{upload}↑",
+    "name_format": "{flag} {country} {download}↓{upload}↑",
     "speed_decimals": 1
   },
   "output": {
