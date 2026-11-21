@@ -321,15 +321,23 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := cleanOutputArtifacts(opts.OutDir); err != nil {
 		return fmt.Errorf("clean output directory: %w", err)
 	}
-	if err := writeInvalidLines(filepath.Join(opts.OutDir, "invalid.txt"), invalidConfigs); err != nil {
-		return fmt.Errorf("write invalid configs: %w", err)
+	var failedItems []failureRecord
+	for _, diagnostic := range sourceDiagnostics {
+		failedItems = append(failedItems, failureRecord{Stage: "SOURCE", Reason: diagnostic})
 	}
-	fmt.Fprintf(stdout, "Invalid configs saved: %d -> %s\n", len(invalidConfigs), filepath.Join(opts.OutDir, "invalid.txt"))
-	if len(parsed) == 0 {
-		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
+	for _, line := range invalidConfigs {
+		failedItems = append(failedItems, failureRecord{
+			Stage: "PARSE", URI: line, Reason: "invalid or unsupported proxy configuration",
+		})
+	}
+	if err := writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems); err != nil {
+		return fmt.Errorf("write failure report: %w", err)
 	}
 	if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
 		return err
+	}
+	if len(parsed) == 0 {
+		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
 	}
 	fmt.Fprintf(stdout, "Parsed: %d | invalid: %d | source errors: %d | metadata lines: %d\n", len(parsed), invalid, sourceErrors, len(metadata))
 
@@ -368,7 +376,6 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
 	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
 	var urlPassedLive []sub.Node
-	var urlFailedLive []sub.Node
 	var urlFilesMu sync.Mutex
 	urlResults, stageErr := runStageWithLiveCallback(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, "checking URL…")
@@ -392,25 +399,21 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		defer urlFilesMu.Unlock()
 		if completed.URLPassed {
 			urlPassedLive = append(urlPassedLive, completed)
-			return writeStageFiles(opts.OutDir, "url-test-finished", urlPassedLive, true)
+			if err := writeStageFiles(opts.OutDir, "url-tested", urlPassedLive, true); err != nil {
+				return err
+			}
+		} else {
+			failedItems = append(failedItems, failureRecordFromNode("URL TEST", completed, completed.URLError))
 		}
-		urlFailedLive = append(urlFailedLive, completed)
-		if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailedLive, true); err != nil {
-			return err
+		if completed.RenameError != "" {
+			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
-		return writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailedLive)
+		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
 	})
 	if stageErr != nil {
 		return stageErr
 	}
 	urlPassed := filterNodes(urlResults, func(n sub.Node) bool { return n.URLPassed })
-	urlFailed := filterNodes(urlResults, func(n sub.Node) bool { return !n.URLPassed })
-	if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailed, true); err != nil {
-		return err
-	}
-	if err := writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailed); err != nil {
-		return err
-	}
 	// Keep every selected node's remark synchronized in all.txt too. Nodes
 	// that fail URL reachability cannot have a meaningful country/speed result,
 	// so they receive the explicit 🌐 Unknown fallback rather than the source name.
@@ -420,7 +423,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
-	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "URL test complete: %d passed / %d failed. Per-protocol URL lists were updated during testing.\n", len(urlPassed), len(urlResults)-len(urlPassed))
@@ -464,7 +467,22 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			speedState += " | rename: " + shortLiveError(n.RenameError)
 		}
 		live(*n, speedLiveDetail(*n, speedState))
-	}, nil)
+	}, func(completed sub.Node) error {
+		if !completed.SpeedPassed {
+			reason := completed.SpeedError
+			if reason == "" {
+				reason = "speed test did not pass"
+			}
+			failedItems = append(failedItems, failureRecordFromNode("SPEED TEST", completed, reason))
+		}
+		if completed.RenameError != "" {
+			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
+		}
+		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
+	})
+	if stageErr != nil {
+		return stageErr
+	}
 
 	// Speed testing changes display names after the URL-stage file was first
 	// written. Propagate the final URI remarks by identity and refresh both
@@ -474,13 +492,13 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
 		return err
 	}
-	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
 		return err
 	}
 
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
-	if err := writeStageFiles(opts.OutDir, "speed-test-finished", speedPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "speedtested", speedPassed, true); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Speed test complete: %d passed / %d failed.\n", len(speedPassed), len(speedFailed))
@@ -507,7 +525,25 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			detail += " | " + n.GeminiNote
 		}
 		live(*n, detail)
-	}, nil)
+	}, func(completed sub.Node) error {
+		if !geminiAvailable(completed) {
+			reason := completed.ServiceError
+			if reason == "" {
+				reason = "Gemini status: " + completed.GeminiStatus
+				if completed.GeminiNote != "" {
+					reason += " (" + completed.GeminiNote + ")"
+				}
+			}
+			failedItems = append(failedItems, failureRecordFromNode("SERVICE CHECK", completed, reason))
+		}
+		if completed.RenameError != "" {
+			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
+		}
+		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
+	})
+	if stageErr != nil {
+		return stageErr
+	}
 	finalCandidates := filterNodes(serviceResults, func(n sub.Node) bool { return geminiAvailable(n) })
 	// Each node is tested exactly once per enabled stage: URL, speed, then Gemini.
 	// There is deliberately no final recheck stage; it duplicated URL and Gemini requests.
@@ -524,9 +560,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	printSubscriptionQualitySummary(stdout, sources, perSourceEligible, urlPassed, speedPassed, finalNodes)
 	fmt.Fprintf(stdout, "Output directory: %s\n", opts.OutDir)
 	if opts.GeminiFile {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speed-test-finished*.txt, gemini.txt and gemini-*.txt (all files contain URI lines)")
+		fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt, failed.txt and Gemini files")
 	} else {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt and speed-test-finished*.txt; Gemini-available nodes are marked with 'Gemini 🐱' in every applicable file")
+		fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt and failed.txt; Gemini-available nodes are marked with 'Gemini 🐱'")
 	}
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
@@ -1814,8 +1850,8 @@ func outputProtocolNames() []string {
 
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
-		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
-		"speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
+		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
+		"speedtested.txt", "speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
 		"speed-test-finished.json", "speedtest-finished.json", "speedtest-failed.json", "tested.json", "service-check-results.json", "final.json",
@@ -1837,8 +1873,8 @@ func cleanOutputArtifacts(dir string) error {
 	protocols := outputProtocolNames()
 	splitBases := []string{
 		"all", "unique", "selected",
-		"url-test-finished", "url-test-failed",
-		"speed-test-finished", "speedtest-finished", "speedtest-failed",
+		"url-tested", "url-test-finished", "url-test-failed",
+		"speedtested", "speed-test-finished", "speedtest-finished", "speedtest-failed",
 		"tested", "service-check-results", "final", "gemini",
 	}
 	for _, base := range splitBases {
@@ -1891,10 +1927,10 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 	if err := writeSubscription(filepath.Join(dir, "all.txt"), allNodes); err != nil {
 		return err
 	}
-	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", urlNodes, true); err != nil {
 		return err
 	}
-	return writeStageFiles(dir, "speed-test-finished", speedNodes, true)
+	return writeStageFiles(dir, "speedtested", speedNodes, true)
 }
 
 func markGeminiNodes(nodes []sub.Node) error {
@@ -2036,31 +2072,50 @@ func writeAtomic(path string, data []byte) error {
 	return nil
 }
 
-// writeURLFailureReport creates a human-readable report with the exact reason
-// each node failed. The separate url-test-failed.txt remains a URI-only list
-// that can be imported into another proxy client.
-func writeURLFailureReport(path, target string, nodes []sub.Node) error {
+type failureRecord struct {
+	Stage    string
+	Name     string
+	Protocol string
+	URI      string
+	Reason   string
+}
+
+func failureRecordFromNode(stage string, node sub.Node, reason string) failureRecord {
+	return failureRecord{Stage: stage, Name: node.Name, Protocol: protocolOf(node), URI: node.URI, Reason: reason}
+}
+
+// writeFailureReport combines source, parsing, URL, speed, service and rename
+// issues into one human-readable report. It is diagnostic, not an importable list.
+func writeFailureReport(path, target string, failures []failureRecord) error {
 	var b strings.Builder
-	fmt.Fprintln(&b, "SubWatch URL TEST failures")
-	fmt.Fprintf(&b, "Target: %s\n", cleanLiveText(target))
-	fmt.Fprintf(&b, "Failed nodes: %d\n", len(nodes))
-	if len(nodes) == 0 {
-		fmt.Fprintln(&b, "\nNo URL test failures.")
+	fmt.Fprintln(&b, "SubWatch failures")
+	fmt.Fprintf(&b, "URL test target: %s\n", cleanLiveText(target))
+	fmt.Fprintf(&b, "Total issues: %d\n", len(failures))
+	if len(failures) == 0 {
+		fmt.Fprintln(&b, "\nNo failures recorded.")
 		return writeAtomic(path, []byte(b.String()))
 	}
-	for i, n := range nodes {
-		name := cleanLiveText(n.Name)
+	for i, failure := range failures {
+		stage := cleanLiveText(failure.Stage)
+		if stage == "" {
+			stage = "UNKNOWN"
+		}
+		name := cleanLiveText(failure.Name)
 		if name == "" {
-			name = "unnamed config"
+			name = "unnamed item"
 		}
-		reason := cleanLiveText(n.URLError)
+		reason := cleanLiveText(failure.Reason)
 		if reason == "" {
-			reason = "URL test failed without an error message"
+			reason = "failed without an error message"
 		}
-		fmt.Fprintf(&b, "\n[%d] %s (%s)\n", i+1, name, protocolOf(n))
-		fmt.Fprintf(&b, "Latency: %d ms\n", n.URLLatencyMS)
-		fmt.Fprintf(&b, "Reason: %s\n", reason)
-		fmt.Fprintf(&b, "URI: %s\n", cleanLiveText(n.URI))
+		fmt.Fprintf(&b, "\n[%d] %s — %s", i+1, stage, name)
+		if failure.Protocol != "" {
+			fmt.Fprintf(&b, " (%s)", cleanLiveText(failure.Protocol))
+		}
+		fmt.Fprintf(&b, "\nReason: %s\n", reason)
+		if failure.URI != "" {
+			fmt.Fprintf(&b, "URI: %s\n", cleanLiveText(failure.URI))
+		}
 	}
 	return writeAtomic(path, []byte(b.String()))
 }
@@ -2075,19 +2130,6 @@ func writeSubscription(path string, nodes []sub.Node) error {
 }
 
 // writeInvalidLines keeps rejected proxy entries as plain input lines.
-func writeInvalidLines(path string, lines []string) error {
-	var b strings.Builder
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	return writeAtomic(path, []byte(b.String()))
-}
-
 func writeReport(path string, nodes []sub.Node) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
