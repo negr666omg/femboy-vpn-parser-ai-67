@@ -15,6 +15,7 @@
     "timeout": "10s"
   },
   "speed_test": {
+    "provider": "cloudflare",
     "concurrency": 4,
     "timeout": "85s",
     "first_byte_timeout": "10s",
