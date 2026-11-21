@@ -1939,6 +1939,14 @@ func applyNodeUpdatesByIdentity(nodes, updates []sub.Node) {
 
 // removeLegacyJSONArtifacts clears output snapshots from versions that exported
 // Node structures as JSON. It only touches known SubWatch-generated names.
+func splitJSONArtifactPaths(dir, base string) []string {
+	paths := make([]string, 0, len(outputProtocolNames()))
+	for _, protocol := range outputProtocolNames() {
+		paths = append(paths, filepath.Join(dir, base+"-"+protocol+".json"))
+	}
+	return paths
+}
+
 func removeLegacyJSONArtifacts(dir string) error {
 	bases := []string{
 		"all", "unique", "selected",
@@ -1947,13 +1955,7 @@ func removeLegacyJSONArtifacts(dir string) error {
 		"service-check-results", "final",
 	}
 	for _, base := range bases {
-		paths := []string{filepath.Join(dir, base+".json")}
-		splitPaths, err := filepath.Glob(filepath.Join(dir, base+"-*.json"))
-		if err != nil {
-			return err
-		}
-		paths = append(paths, splitPaths...)
-		for _, path := range paths {
+		for _, path := range append([]string{filepath.Join(dir, base+".json")}, splitJSONArtifactPaths(dir, base)...) {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove %s: %w", path, err)
 			}
