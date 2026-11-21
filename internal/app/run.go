@@ -431,7 +431,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 2 begins only after every URL test has completed (global barrier).
 	// urlPassed remains the authoritative in-memory result set.
 	fmt.Fprintf(stdout, "\n[3/4] SPEED TEST (%s): %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", strings.ToUpper(opts.SpeedProvider), len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
-	speedResults, _ := runStageWithLiveCallback(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	speedResults, stageErr := runStageWithLiveCallback(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "starting "+strings.ToUpper(opts.SpeedProvider)+" speed test…"))
 		down, up, testErr := runSpeedTestWithProgress(stageCtx, *n, opts, func(progress check.SpeedProgress) {
 			live(*n, speedProgressDetail(*n, progress))
@@ -506,7 +506,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 3 starts only after every speed test has completed. No service check
 	// is run on a node that failed either speed threshold.
 	fmt.Fprintf(stdout, "\n[4/4] SERVICE CHECK: %d speed-passed nodes, Gemini must be fully available\n", len(speedPassed))
-	serviceResults, _ := runStageWithLiveCallback(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	serviceResults, stageErr := runStageWithLiveCallback(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "Gemini: checking…"))
 		status, note, region, ipInfo, testErr := runServiceCheck(stageCtx, *n, opts)
 		n.GeminiStatus, n.GeminiNote, n.GeminiRegion = status, note, region
