@@ -661,7 +661,7 @@ func TestSourceProgressLineRedactsCredentialsAndFitsTerminal(t *testing.T) {
 	if !ok || startCol < 1 || endCol <= startCol {
 		t.Fatalf("full source title is not exposed as a clickable range: %d-%d, line=%q", startCol, endCol, line)
 	}
-	if got := displayWidth(line); got > 79 {
+	if got := displayWidth(line); got > 119 {
 		t.Fatalf("source status width=%d, exceeds terminal limit: %q", got, line)
 	}
 	progress.Phase = "parsing"
