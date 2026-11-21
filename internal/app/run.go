@@ -1437,6 +1437,9 @@ func markGeminiNodes(nodes []sub.Node) {
 		if name == "" {
 			name = nodes[i].Protocol
 		}
+		if nodes[i].Outbound == nil {
+			nodes[i].Outbound = make(map[string]any)
+		}
 		sub.RenameNode(&nodes[i], name+geminiNameSuffix)
 	}
 }
