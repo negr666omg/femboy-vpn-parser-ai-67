@@ -81,6 +81,42 @@ func TestDefaultSourceTimeout(t *testing.T) {
 	}
 }
 
+func TestDefaultStabilityPingThreshold(t *testing.T) {
+	if got := DefaultOptions().StabilityMaxPingMS; got != 100 {
+		t.Fatalf("default stability max ping = %d, want 100 ms", got)
+	}
+}
+
+func TestLoadConfiguredStabilityPingThreshold(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"stability":{"max_ping_ms":75}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := LoadOptions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.StabilityMaxPingMS != 75 {
+		t.Fatalf("configured stability max ping = %d, want 75", opts.StabilityMaxPingMS)
+	}
+}
+
+func TestInvalidStabilityPingThresholdIsRejected(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(path, []byte(`{"stability":{"max_ping_ms":`+value+`}}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "stability.max_ping_ms") {
+				t.Fatalf("expected invalid stability.max_ping_ms error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestDefaultLiveDisplayModeKeepsCompletedServerVisible(t *testing.T) {
 	if got := DefaultOptions().LiveDisplayMode; got != "after_result" {
 		t.Fatalf("default live display mode = %q, want after_result", got)
@@ -300,6 +336,78 @@ func TestSpeedThresholdRequiresBothDirections(t *testing.T) {
 	}
 	if got := speedThresholdError(5, 5, 5, 5); got != "" {
 		t.Fatalf("exact threshold should pass: %s", got)
+	}
+	if got := speedThresholdError(1, 50, 8, 8); got == "" || !strings.Contains(got, "download") {
+		t.Fatalf("download 1 Mbps must fail even when upload is 50 Mbps: %q", got)
+	}
+	if got := speedThresholdError(50, 1, 8, 8); got == "" || !strings.Contains(got, "upload") {
+		t.Fatalf("upload 1 Mbps must fail even when download is 50 Mbps: %q", got)
+	}
+}
+
+func TestStabilityStateIntersectsEveryCompletedCycle(t *testing.T) {
+	state := NewStabilityState()
+	if err := state.prepareOutput(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	cycle1URL := []sub.Node{
+		{Key: "a", URLPassed: true, URLLatencyMS: 99},
+		{Key: "b", URLPassed: true, URLLatencyMS: 100},
+		{Key: "c", URLPassed: true, URLLatencyMS: 35},
+	}
+	cycle1Speed := []sub.Node{
+		{Key: "a", URLPassed: true, URLLatencyMS: 99, SpeedPassed: true, DownloadMbps: 50, UploadMbps: 20},
+		{Key: "c", URLPassed: true, URLLatencyMS: 35, SpeedPassed: true, DownloadMbps: 1, UploadMbps: 50},
+	}
+	url, speed, cycle := state.advance(cycle1URL, cycle1Speed, 100, 8, 8)
+	if cycle != 1 || len(url) != 2 || len(speed) != 1 || nodeDedupKey(speed[0]) != "a" {
+		t.Fatalf("cycle 1 stable URL/speed = %d/%d cycle=%d; want 2/1 cycle=1", len(url), len(speed), cycle)
+	}
+
+	cycle2URL := []sub.Node{
+		{Key: "a", URLPassed: true, URLLatencyMS: 40},
+		{Key: "b", URLPassed: true, URLLatencyMS: 35},
+		{Key: "c", URLPassed: true, URLLatencyMS: 101},
+	}
+	cycle2Speed := []sub.Node{
+		{Key: "a", URLPassed: true, URLLatencyMS: 40, SpeedPassed: true, DownloadMbps: 10, UploadMbps: 8},
+		{Key: "b", URLPassed: true, URLLatencyMS: 35, SpeedPassed: true, DownloadMbps: 80, UploadMbps: 80},
+	}
+	url, speed, cycle = state.advance(cycle2URL, cycle2Speed, 100, 8, 8)
+	if cycle != 2 || len(url) != 1 || nodeDedupKey(url[0]) != "a" || len(speed) != 1 || nodeDedupKey(speed[0]) != "a" {
+		t.Fatalf("cycle 2 stable URL/speed = %#v/%#v cycle=%d; want only a in both", stabilityNodeKeys(url), stabilityNodeKeys(speed), cycle)
+	}
+
+	cycle3URL := []sub.Node{{Key: "a", URLPassed: true, URLLatencyMS: 100}}
+	cycle3Speed := []sub.Node{{Key: "a", URLPassed: true, URLLatencyMS: 100, SpeedPassed: true, DownloadMbps: 80, UploadMbps: 80}}
+	url, speed, cycle = state.advance(cycle3URL, cycle3Speed, 100, 8, 8)
+	if cycle != 3 || len(url) != 0 || len(speed) != 0 {
+		t.Fatalf("a 100 ms ping must remove the node from both stable lists: URL=%d speed=%d cycle=%d", len(url), len(speed), cycle)
+	}
+}
+
+func stabilityNodeKeys(nodes []sub.Node) []string {
+	keys := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		keys = append(keys, nodeDedupKey(n))
+	}
+	return keys
+}
+
+func TestStableMarkerCombinesWithGeminiInOrder(t *testing.T) {
+	nodes := []sub.Node{{
+		Key: "stable", Protocol: "vless", Name: "🇩🇪 Germany 63↓21↑",
+		URI: "vless://uuid@example.test:443#Germany", GeminiStatus: "available",
+	}}
+	if err := markStableNodes(nodes, nodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := markGeminiNodes(nodes); err != nil {
+		t.Fatal(err)
+	}
+	if want := "🇩🇪 Germany 63↓21↑ 🧱 Gemini 🐱"; nodes[0].Name != want {
+		t.Fatalf("combined node name = %q, want %q", nodes[0].Name, want)
 	}
 }
 
