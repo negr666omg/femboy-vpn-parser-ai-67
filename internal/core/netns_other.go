@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os/exec"
 )
 
@@ -21,5 +22,9 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 func (n *NetworkNamespace) Command(ctx context.Context, binary string, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, binary, args...)
 }
+
+func (n *NetworkNamespace) HostInterface() string { return "" }
+
+func namespaceProxyDialer(string) *net.Dialer { return nil }
 
 func (n *NetworkNamespace) Close() {}
