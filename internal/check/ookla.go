@@ -501,7 +501,7 @@ func runOoklaDirection(parent context.Context, client *http.Client, method, targ
 			return 0, fmt.Errorf("could not calculate Ookla throughput")
 		}
 		if progress != nil {
-			event := SpeedProgress{Phase: phase + " complete", CompletedBytes: total}
+			event := SpeedProgress{Phase: phase, CompletedBytes: total}
 			if phase == "download" {
 				event.DownloadMbps = rate
 			} else {
