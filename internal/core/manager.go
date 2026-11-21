@@ -37,10 +37,20 @@ type Instance struct {
 }
 
 func FindOrDownload(binary string) (string, error) {
-	return FindOrDownloadProgress(binary, io.Discard)
+	return FindOrDownloadProgressContext(context.Background(), binary, io.Discard)
 }
 
 func FindOrDownloadProgress(binary string, progress io.Writer) (string, error) {
+	return FindOrDownloadProgressContext(context.Background(), binary, progress)
+}
+
+// FindOrDownloadProgressContext prepares sing-box while respecting cancellation.
+// A completed binary is installed with an atomic rename so concurrent runs
+// cannot observe a partially extracted executable.
+func FindOrDownloadProgressContext(ctx context.Context, binary string, progress io.Writer) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if progress == nil {
 		progress = io.Discard
 	}
@@ -70,9 +80,13 @@ func FindOrDownloadProgress(binary string, progress io.Writer) (string, error) {
 	dir := filepath.Join(cache, "subwatch", "sing-box-"+coreVersion)
 	bin := filepath.Join(dir, "sing-box")
 	if st, err := os.Stat(bin); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0111 != 0 {
-		if e := exec.Command(bin, "version").Run(); e == nil {
+		check := exec.CommandContext(ctx, bin, "version")
+		if e := check.Run(); e == nil {
 			fmt.Fprintf(progress, "[prepare] using cached sing-box: %s\n", bin)
 			return bin, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 		_ = os.Remove(bin)
 	}
@@ -81,7 +95,7 @@ func FindOrDownloadProgress(binary string, progress io.Writer) (string, error) {
 	}
 	url := "https://github.com/SagerNet/sing-box/releases/download/v" + coreVersion + "/" + asset
 	fmt.Fprintf(progress, "[prepare] downloading sing-box %s for linux/%s...\n", coreVersion, arch)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -92,7 +106,7 @@ func FindOrDownloadProgress(binary string, progress io.Writer) (string, error) {
 		return "", fmt.Errorf("download sing-box: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download sing-box: HTTP %s", resp.Status)
 	}
 	tmp, err := os.CreateTemp(dir, "sing-box-*.tgz")
@@ -103,10 +117,13 @@ func FindOrDownloadProgress(binary string, progress io.Writer) (string, error) {
 	defer os.Remove(tmpName)
 	h := sha256.New()
 	if _, err = io.Copy(io.MultiWriter(tmp, h), &progressReader{reader: io.LimitReader(resp.Body, 80<<20), writer: progress, next: 2 * (1024 * 1024)}); err != nil {
-		tmp.Close()
-		return "", err
+		_ = tmp.Close()
+		return "", fmt.Errorf("download sing-box: %w", err)
 	}
 	if err = tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	fmt.Fprintln(progress, "[prepare] download complete; verifying SHA-256...")
@@ -126,6 +143,9 @@ func FindOrDownloadProgress(binary string, progress io.Writer) (string, error) {
 	tr := tar.NewReader(gz)
 	found := false
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		hdr, e := tr.Next()
 		if e == io.EOF {
 			break
@@ -136,17 +156,40 @@ func FindOrDownloadProgress(binary string, progress io.Writer) (string, error) {
 		if filepath.Base(hdr.Name) != "sing-box" || hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		out, e := os.OpenFile(bin, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0700)
+		if hdr.Size <= 0 || hdr.Size > 100<<20 {
+			return "", fmt.Errorf("sing-box archive entry has invalid size: %d bytes", hdr.Size)
+		}
+		out, e := os.CreateTemp(dir, "sing-box-bin-*.tmp")
 		if e != nil {
 			return "", e
 		}
-		_, copyErr := io.Copy(out, io.LimitReader(tr, 100<<20))
-		closeErr := out.Close()
+		outName := out.Name()
+		defer os.Remove(outName)
+		if e = out.Chmod(0700); e != nil {
+			_ = out.Close()
+			return "", e
+		}
+		written, copyErr := io.CopyN(out, tr, hdr.Size)
 		if copyErr != nil {
+			_ = out.Close()
 			return "", copyErr
 		}
-		if closeErr != nil {
-			return "", closeErr
+		if written != hdr.Size {
+			_ = out.Close()
+			return "", fmt.Errorf("incomplete sing-box archive entry: %d/%d bytes", written, hdr.Size)
+		}
+		if e = out.Sync(); e != nil {
+			_ = out.Close()
+			return "", e
+		}
+		if e = out.Close(); e != nil {
+			return "", e
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := os.Rename(outName, bin); err != nil {
+			return "", err
 		}
 		found = true
 		break
@@ -201,7 +244,7 @@ func Start(ctx context.Context, binary string, outbound map[string]any, iface st
 }
 
 func startWithRetries(ctx context.Context, binary string, outbound map[string]any, iface string, namespace []string, portRetry int) (*Instance, error) {
-	proxyBin, err := FindOrDownload(binary)
+	proxyBin, err := FindOrDownloadProgressContext(ctx, binary, io.Discard)
 	if err != nil {
 		return nil, err
 	}
