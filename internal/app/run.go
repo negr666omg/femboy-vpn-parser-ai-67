@@ -906,7 +906,7 @@ func truncateDisplayMiddle(value string, maxWidth int) string {
 	// Keep more of the beginning so a long source URL still exposes its host,
 	// while retaining its suffix and the separate progress/status field.
 	available := maxWidth - 1
-	prefixBudget := available * 3 / 4
+	prefixBudget := available * 5 / 6
 	suffixBudget := available - prefixBudget
 	runes := []rune(value)
 
