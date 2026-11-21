@@ -44,8 +44,9 @@ type Options struct {
 	LookupIP           bool
 	RemoteUpload       RemoteUploadOptions
 	LiveDisplayMode    string
-	StabilityMaxPingMS int64
-	StabilityState     *StabilityState
+	StabilityMaxPingMS     int64
+	StabilityState         *StabilityState
+	RetryOnConnectionError bool
 }
 
 type RemoteUploadOptions struct {
@@ -59,12 +60,14 @@ type RemoteUploadOptions struct {
 	Password        string
 	RemoteDirectory string
 	Interface       string
+	RetryOnConnectionError bool
 }
 
 type fileConfig struct {
 	Network struct {
 		Interface              string `json:"interface"`
 		IsolateSourceDownloads bool   `json:"isolate_source_downloads"`
+		RetryOnConnectionError bool   `json:"retry_on_connection_error"`
 	} `json:"network"`
 	Sources struct {
 		File    string `json:"file"`
@@ -164,6 +167,7 @@ func LoadOptions(path string) (Options, error) {
 		opts.Interface = cfg.Network.Interface
 	}
 	opts.IsolateSourceDownloads = cfg.Network.IsolateSourceDownloads
+	opts.RetryOnConnectionError = cfg.Network.RetryOnConnectionError
 	if cfg.Sources.File != "" {
 		opts.Sources = cfg.Sources.File
 	}
@@ -309,7 +313,7 @@ func LoadOptions(path string) (Options, error) {
 				r.PrivateKey = filepath.Join(home, r.PrivateKey[2:])
 			}
 		}
-		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory, Interface: strings.TrimSpace(r.Interface)}
+		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory, Interface: strings.TrimSpace(r.Interface), RetryOnConnectionError: opts.RetryOnConnectionError}
 	}
 	if cfg.LiveDisplay.Mode != "" {
 		mode := strings.ToLower(strings.TrimSpace(cfg.LiveDisplay.Mode))
@@ -386,7 +390,8 @@ func ExampleConfig() string {
 	return `{
   "network": {
     "interface": "auto",
-    "isolate_source_downloads": false
+    "isolate_source_downloads": false,
+    "retry_on_connection_error": false
   },
   "sources": {
     "file": "sources.txt",
