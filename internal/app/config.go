@@ -123,7 +123,7 @@ type fileConfig struct {
 func DefaultOptions() Options {
 	return Options{
 		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true,
-		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"},
+		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4, SpeedProvider: "cloudflare",
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
 		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
@@ -381,7 +381,7 @@ func ExampleConfig() string {
     "timeout": "30s"
   },
   "protocols": {
-    "enabled": ["vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http"]
+    "enabled": ["vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "tuic", "socks", "http"]
   },
   "url_test": {
     "url": "https://www.gstatic.com/generate_204",

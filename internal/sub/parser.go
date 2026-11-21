@@ -134,6 +134,8 @@ func ParseURI(raw string) (Node, error) {
 		out, err = parseVLESS(u)
 	case "trojan":
 		out, err = parseTrojan(u)
+	case "hysteria":
+		out, err = parseHysteria(u)
 	case "hysteria2", "hy2":
 		out, err = parseHysteria2(u)
 	case "tuic":
@@ -195,6 +197,15 @@ func hostPort(u *url.URL) (string, uint16, error) {
 	}
 	return host, uint16(n), nil
 }
+func truthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func tlsOptions(q url.Values, defaultServer string) map[string]any {
 	security := strings.ToLower(q.Get("security"))
 	enabled := security == "tls" || security == "reality" || q.Get("tls") == "1" || q.Get("tls") == "true"
@@ -215,7 +226,7 @@ func tlsOptions(q url.Values, defaultServer string) map[string]any {
 	if server != "" {
 		t["server_name"] = server
 	}
-	if q.Get("allowInsecure") == "1" || q.Get("insecure") == "1" || q.Get("insecure") == "true" {
+	if truthy(q.Get("allowInsecure")) || truthy(q.Get("insecure")) || truthy(q.Get("skip-cert-verify")) {
 		t["insecure"] = true
 	}
 	if q.Get("alpn") != "" {
@@ -360,60 +371,68 @@ func vmessPayload(u *url.URL) string {
 
 func parseVMess(u *url.URL) (map[string]any, error) {
 	raw := vmessPayload(u)
-	b, e := decodeBase64(raw)
-	if e != nil {
-		return nil, fmt.Errorf("vmess payload: %w", e)
+	b, err := decodeBase64(raw)
+	if err != nil {
+		return nil, fmt.Errorf("vmess payload: %w", err)
 	}
 	var v struct {
-		Add  string          `json:"add"`
-		Port json.RawMessage `json:"port"`
-		ID   string          `json:"id"`
-		Aid  json.RawMessage `json:"aid"`
-		Scy  string          `json:"scy"`
-		Net  string          `json:"net"`
-		Host string          `json:"host"`
-		Path string          `json:"path"`
-		TLS  string          `json:"tls"`
-		SNI  string          `json:"sni"`
-		Alpn string          `json:"alpn"`
-		Name string          `json:"ps"`
-		Type string          `json:"type"`
+		Add           string          `json:"add"`
+		Port          json.RawMessage `json:"port"`
+		ID            string          `json:"id"`
+		Aid           json.RawMessage `json:"aid"`
+		Scy           string          `json:"scy"`
+		Net           string          `json:"net"`
+		Host          string          `json:"host"`
+		Path          string          `json:"path"`
+		TLS           string          `json:"tls"`
+		SNI           string          `json:"sni"`
+		Alpn          string          `json:"alpn"`
+		Name          string          `json:"ps"`
+		Type          string          `json:"type"`
+		Fingerprint   string          `json:"fp"`
+		AllowInsecure json.RawMessage `json:"allowInsecure"`
+		ThroneExtra   string          `json:"throneExtra"`
 	}
-	if e = json.Unmarshal(b, &v); e != nil {
-		return nil, e
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
 	}
 	var port int
 	if len(v.Port) > 0 {
 		_ = json.Unmarshal(v.Port, &port)
 		if port == 0 {
-			var s string
-			_ = json.Unmarshal(v.Port, &s)
-			port, _ = strconv.Atoi(s)
+			var value string
+			_ = json.Unmarshal(v.Port, &value)
+			port, _ = strconv.Atoi(value)
 		}
 	}
 	if v.Add == "" || port < 1 || port > 65535 || v.ID == "" {
 		return nil, errors.New("vmess requires add, port and id")
 	}
-	security := v.Scy
+
+	security := strings.TrimSpace(v.Scy)
 	if security == "" {
 		security = "auto"
 	}
-	o := map[string]any{"type": "vmess", "server": v.Add, "server_port": port, "uuid": v.ID, "security": security}
+	o := map[string]any{
+		"type": "vmess", "server": v.Add, "server_port": port,
+		"uuid": v.ID, "security": security,
+	}
 	if v.Name != "" {
 		o["_name"] = v.Name
 	}
-	var aid int
+	var alterID int
 	if len(v.Aid) > 0 {
-		_ = json.Unmarshal(v.Aid, &aid)
-		if aid == 0 {
-			var s string
-			_ = json.Unmarshal(v.Aid, &s)
-			aid, _ = strconv.Atoi(s)
+		_ = json.Unmarshal(v.Aid, &alterID)
+		if alterID == 0 {
+			var value string
+			_ = json.Unmarshal(v.Aid, &value)
+			alterID, _ = strconv.Atoi(value)
 		}
 	}
-	o["alter_id"] = aid
+	o["alter_id"] = alterID
+
 	q := url.Values{}
-	if strings.EqualFold(v.TLS, "tls") {
+	if strings.EqualFold(v.TLS, "tls") || truthy(v.TLS) {
 		q.Set("security", "tls")
 	}
 	if v.SNI != "" {
@@ -422,18 +441,74 @@ func parseVMess(u *url.URL) (map[string]any, error) {
 	if v.Alpn != "" {
 		q.Set("alpn", v.Alpn)
 	}
-	if t := tlsOptions(q, v.Add); t != nil {
-		o["tls"] = t
+	if v.Fingerprint != "" {
+		q.Set("fp", v.Fingerprint)
 	}
-	q = url.Values{}
-	q.Set("type", v.Net)
-	q.Set("host", v.Host)
-	q.Set("path", v.Path)
-	if t := transportOptions(q); t != nil {
-		o["transport"] = t
+	var allowInsecure bool
+	if json.Unmarshal(v.AllowInsecure, &allowInsecure) == nil && allowInsecure {
+		q.Set("allowInsecure", "true")
+	} else {
+		var allowInsecureText string
+		if json.Unmarshal(v.AllowInsecure, &allowInsecureText) == nil && truthy(allowInsecureText) {
+			q.Set("allowInsecure", "true")
+		}
+	}
+	if tls := tlsOptions(q, v.Add); tls != nil {
+		o["tls"] = tls
+	}
+
+	network := strings.ToLower(strings.TrimSpace(v.Net))
+	if network == "" {
+		network = "tcp"
+	}
+	transportType := network
+	host, path := v.Host, v.Path
+
+	// Throne keeps V2Ray TCP-header settings in a non-standard JSON field.
+	// Import its headerType/host/path so TCP+HTTP nodes are not silently
+	// converted into plain TCP connections.
+	if strings.TrimSpace(v.ThroneExtra) != "" {
+		if extra, parseErr := url.ParseQuery(v.ThroneExtra); parseErr == nil {
+			if value := strings.TrimSpace(extra.Get("headerType")); value != "" && network == "tcp" {
+				transportType = strings.ToLower(value)
+			}
+			if value := extra.Get("host"); value != "" {
+				host = value
+			}
+			if value := extra.Get("path"); value != "" {
+				path = value
+			}
+		}
+	}
+	if network == "tcp" {
+		// In standard VMess JSON, "type":"http" means HTTP obfuscation
+		// over TCP; "none" means an ordinary TCP stream.
+		if transportType == "tcp" || transportType == "" {
+			transportType = strings.ToLower(strings.TrimSpace(v.Type))
+		}
+		if transportType == "none" || transportType == "tcp" {
+			transportType = ""
+		}
+	}
+	if transportType != "" {
+		switch transportType {
+		case "ws", "grpc", "httpupgrade", "http-upgrade", "http", "h2":
+			transportQuery := url.Values{}
+			transportQuery.Set("type", transportType)
+			transportQuery.Set("host", host)
+			transportQuery.Set("path", path)
+			if transport := transportOptions(transportQuery); transport != nil {
+				o["transport"] = transport
+			}
+		default:
+			return nil, fmt.Errorf("unsupported VMess transport %q", transportType)
+		}
+	} else if network != "tcp" {
+		return nil, fmt.Errorf("unsupported VMess network %q", network)
 	}
 	return o, nil
 }
+
 func parseShadowsocks(u *url.URL, raw string) (map[string]any, error) {
 	server, port, e := hostPort(u)
 	if e != nil {
@@ -481,6 +556,62 @@ func parseShadowsocks(u *url.URL, raw string) (map[string]any, error) {
 	}
 	return map[string]any{"type": "shadowsocks", "server": server, "server_port": port, "method": parts[0], "password": parts[1]}, nil
 }
+func parseHysteria(u *url.URL) (map[string]any, error) {
+	host, port, err := hostPort(u)
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	auth := q.Get("auth")
+	if auth == "" && u.User != nil {
+		auth = u.User.Username()
+		if password, ok := u.User.Password(); ok && password != "" {
+			auth = password
+		}
+	}
+	if auth == "" {
+		return nil, errors.New("missing Hysteria authentication")
+	}
+	out := map[string]any{
+		"type": "hysteria", "server": host, "server_port": port,
+		"auth_str": auth,
+	}
+	for _, item := range []struct {
+		keys  []string
+		field string
+	}{
+		{[]string{"upmbps", "up_mbps", "up"}, "up_mbps"},
+		{[]string{"downmbps", "down_mbps", "down"}, "down_mbps"},
+	} {
+		value := ""
+		for _, key := range item.keys {
+			if value = strings.TrimSpace(q.Get(key)); value != "" {
+				break
+			}
+		}
+		if value == "" {
+			continue
+		}
+		mbps, parseErr := strconv.Atoi(value)
+		if parseErr != nil || mbps < 0 {
+			return nil, fmt.Errorf("invalid Hysteria %s value %q", item.field, value)
+		}
+		out[item.field] = mbps
+	}
+	tls := tlsOptions(q, host)
+	if tls == nil {
+		tls = map[string]any{"enabled": true, "server_name": host}
+	}
+	out["tls"] = tls
+	if obfs := q.Get("obfs"); obfs != "" {
+		out["obfs"] = obfs
+	}
+	if network := strings.ToLower(strings.TrimSpace(q.Get("network"))); network == "tcp" || network == "udp" {
+		out["network"] = network
+	}
+	return out, nil
+}
+
 func parseHysteria2(u *url.URL) (map[string]any, error) {
 	h, p, e := hostPort(u)
 	if e != nil {
