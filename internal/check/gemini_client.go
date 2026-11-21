@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"sync"
@@ -36,6 +37,10 @@ func NewGeminiClient(proxyURL string, timeout time.Duration) (*http.Client, erro
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("create Gemini cookie jar: %w", err)
+	}
 	transport := &geminiTransport{
 		proxy:   proxy,
 		h2:      &http2.Transport{DisableCompression: true},
@@ -43,6 +48,7 @@ func NewGeminiClient(proxyURL string, timeout time.Duration) (*http.Client, erro
 	}
 	return &http.Client{
 		Transport: transport,
+		Jar:       jar,
 		Timeout:   timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
