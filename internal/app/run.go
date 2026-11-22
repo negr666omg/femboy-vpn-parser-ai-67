@@ -471,20 +471,6 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 			opts.NetworkNamespaceProxyIP = ns.ProxyIP
 			opts.NetworkNamespaceHostIP = ns.HostIP
 
-			// Prove that the namespace itself can resolve and reach the configured
-			// URL directly before starting thousands of independent proxy tests.
-			probeTargets := networkPreflightTargets(selected, 24)
-			probeTimeout := 12 * time.Second
-			var probeLog bytes.Buffer
-			probeOutput := io.MultiWriter(stdout, &probeLog)
-			fmt.Fprintf(stdout, "[network] checking reachability of %d proxy endpoints through %s (before proxy tests)\n", len(probeTargets), opts.Interface)
-			probeErr := ns.Preflight(ctx, probeTargets, probeTimeout, probeOutput)
-			if writeErr := os.WriteFile(filepath.Join(opts.OutDir, "network-preflight.log"), probeLog.Bytes(), 0600); writeErr != nil {
-				fmt.Fprintf(stderr, "failed to save network preflight log: %v\n", writeErr)
-			}
-			if probeErr != nil {
-				return fmt.Errorf("network preflight failed; all proxy tests were skipped: %w", probeErr)
-			}
 		}
 	}
 
@@ -608,74 +594,6 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		fmt.Fprintf(stdout, "Cloudflare fallback complete: %d rescued / %d tested; rescued nodes are included in speedtested.txt.\n", len(cloudflareFallbackPassed), len(fallbackResults))
 	}
 
-	// Experimental gaming checks are deliberately independent of the speed
-	// provider and fallback result: every URL-passed node gets this stage.
-	gamingPassedByKey := make(map[string]bool)
-	if opts.GamingQuality.Enabled {
-		fmt.Fprintf(stdout, "\n[3c/4] EXPERIMENTAL GAMING QUALITY: %d URL-passed nodes via Cloudflare, timeout %s\n", len(urlPassed), opts.GamingQuality.Timeout)
-		gamingResults, gamingStageErr := runStageWithLiveCallback(ctx, "GAMING QUALITY", urlPassed, opts.GamingQuality.Concurrency, stdout,
-			func(n *sub.Node) bool { return n.GamingPassed },
-			func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
-				n.GamingTested = true
-				var quality check.NetworkQuality
-				testErr := withNodeClient(stageCtx, *n, opts, opts.GamingQuality.Timeout, func(nodeCtx context.Context, client *http.Client) error {
-					testCtx, cancel := context.WithTimeout(nodeCtx, opts.GamingQuality.Timeout)
-					defer cancel()
-					var qualityErr error
-					quality, qualityErr = check.CloudflareNetworkQualityTest(
-						testCtx, client,
-						"https://speed.cloudflare.com/__down?bytes={bytes}",
-						"https://speed.cloudflare.com/__up",
-						opts.GamingQuality.DownloadBytes,
-						opts.GamingQuality.UploadBytes,
-						opts.GamingQuality.LatencySamples,
-						opts.GamingQuality.SampleInterval,
-					)
-					return qualityErr
-				})
-				n.GamingLatencyMS = quality.LatencyMS
-				n.GamingJitterMS = quality.JitterMS
-				n.GamingDownloadLoadedLatencyMS = quality.DownloadLoadedLatencyMS
-				n.GamingDownloadLoadedJitterMS = quality.DownloadLoadedJitterMS
-				n.GamingUploadLoadedLatencyMS = quality.UploadLoadedLatencyMS
-				n.GamingUploadLoadedJitterMS = quality.UploadLoadedJitterMS
-				if testErr != nil {
-					n.GamingPassed = false
-					n.GamingError = testErr.Error()
-					live(*n, "Gaming quality: FAILED | "+shortLiveError(n.GamingError))
-					return
-				}
-				n.GamingPassed, n.GamingError = gamingQualityDecision(quality, opts.GamingQuality)
-				live(*n, gamingQualityLiveDetail(quality, n.GamingPassed, n.GamingError))
-			},
-			func(completed sub.Node) error {
-				if !completed.GamingPassed && completed.GamingError != "" {
-					failures.AddNode("GAMING QUALITY", completed, completed.GamingError)
-				}
-				return nil
-			},
-		)
-		if gamingStageErr != nil {
-			return gamingStageErr
-		}
-		for _, completed := range gamingResults {
-			if completed.GamingPassed {
-				gamingPassedByKey[nodeIdentity(completed)] = true
-			}
-		}
-		gamingPassed := filterNodes(gamingResults, func(n sub.Node) bool { return n.GamingPassed })
-		if err := applyStabilityMarkers(gamingPassed, nil, gamingPassedByKey); err != nil {
-			return fmt.Errorf("apply gaming markers to gaming-quality list: %w", err)
-		}
-		if err := writeStageFiles(opts.OutDir, "gaming-quality", gamingPassed, true); err != nil {
-			return fmt.Errorf("write gaming-quality results: %w", err)
-		}
-		if err := writeGamingQualityReport(opts.OutDir, gamingResults); err != nil {
-			return fmt.Errorf("write gaming-quality report: %w", err)
-		}
-		fmt.Fprintf(stdout, "Gaming quality complete: %d candidates / %d tested. Packet loss is not measured in this experimental HTTP-only mode.\n", len(gamingPassed), len(gamingResults))
-	}
-
 	// Speed testing may rename nodes after the URL-stage file was first written.
 	// Propagate final provider measurements and remarks by stable node identity.
 	applyNodeUpdatesByIdentity(parsed, speedResults)
@@ -777,20 +695,16 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 	// Stability is based only on successful URL checks under 100 ms. A node
 	// receives 🧱 from its second consecutive qualifying full cycle onward.
 	streaks := stability.recordCycle(urlResults)
-	if err := writeStabilityResults(opts.OutDir, parsed, urlPassed, speedPassed, finalNodes, streaks, gamingPassedByKey); err != nil {
+	if err := writeStabilityResults(opts.OutDir, parsed, urlPassed, speedPassed, finalNodes, streaks); err != nil {
 		return fmt.Errorf("write stability markers: %w", err)
 	}
 	stableCount := 0
 	for key, streak := range streaks {
-		if streak >= stableConsecutiveCycles && !gamingPassedByKey[key] {
+		if streak >= stableConsecutiveCycles {
 			stableCount++
 		}
 	}
 	fmt.Fprintf(stdout, "[stability] %d nodes marked 🧱 (at least %d consecutive URL checks below %d ms)\n", stableCount, stableConsecutiveCycles, stableURLLatencyLimitMS)
-	if opts.GamingQuality.Enabled {
-		fmt.Fprintf(stdout, "[gaming] %d nodes marked 🎮 (experimental HTTP-only quality; packet loss not measured)\n", len(gamingPassedByKey))
-	}
-
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
 	perSourceEligible := make([][]sub.Node, len(perSourceNodes))
 	for i := range perSourceNodes {
@@ -802,7 +716,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		return fmt.Errorf("write failure log: %w", err)
 	}
 	fmt.Fprintf(stdout, "Failure log: %d entries -> %s\n", failures.Count(), filepath.Join(opts.OutDir, "failed.txt"))
-	fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt, gaming-quality.txt, gaming-quality.csv, failed.txt")
+	fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt, failed.txt")
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
 			failures.Add("UPLOAD", uploadErr.Error())
@@ -1820,42 +1734,6 @@ func setStageError(n *sub.Node, label, message string) {
 	}
 }
 
-// networkPreflightTargets samples proxy endpoints across the selected node
-// set instead of treating one URL-test hostname as a requirement for direct
-// internet access. This checks the actual destinations sing-box must reach.
-func networkPreflightTargets(nodes []sub.Node, limit int) []string {
-	if limit < 1 || len(nodes) == 0 {
-		return nil
-	}
-	count := len(nodes)
-	if count > limit {
-		count = limit
-	}
-	seen := make(map[string]bool, count)
-	out := make([]string, 0, count)
-	for i := 0; i < count; i++ {
-		index := i
-		if count > 1 && len(nodes) > count {
-			index = i * (len(nodes) - 1) / (count - 1)
-		}
-		node := nodes[index]
-		host := strings.TrimSpace(fmt.Sprint(node.Outbound["server"]))
-		port := strings.TrimSpace(fmt.Sprint(node.Outbound["server_port"]))
-		if host == "" || port == "" || host == "<nil>" || port == "<nil>" {
-			continue
-		}
-		if _, err := strconv.Atoi(port); err != nil {
-			continue
-		}
-		endpoint := net.JoinHostPort(strings.Trim(host, "[]"), port)
-		if !seen[endpoint] {
-			seen[endpoint] = true
-			out = append(out, endpoint)
-		}
-	}
-	return out
-}
-
 func runURLTest(parent context.Context, n sub.Node, opts Options) (bool, int64, error) {
 	var passed bool
 	var latency int64
@@ -1953,83 +1831,6 @@ func runSpeedTestWithProviderProgress(parent context.Context, n sub.Node, opts O
 	return down, up, err
 }
 
-
-func gamingQualityDecision(q check.NetworkQuality, limits GamingQualityOptions) (bool, string) {
-	var failures []string
-	if q.LatencyMS > limits.MaxLatencyMS {
-		failures = append(failures, fmt.Sprintf("latency %.1f ms > %.1f ms", q.LatencyMS, limits.MaxLatencyMS))
-	}
-	if q.JitterMS > limits.MaxJitterMS {
-		failures = append(failures, fmt.Sprintf("jitter %.1f ms > %.1f ms", q.JitterMS, limits.MaxJitterMS))
-	}
-	if q.DownloadLoadedLatencyMS > limits.MaxLoadedLatencyMS {
-		failures = append(failures, fmt.Sprintf("download-loaded latency %.1f ms > %.1f ms", q.DownloadLoadedLatencyMS, limits.MaxLoadedLatencyMS))
-	}
-	if q.UploadLoadedLatencyMS > limits.MaxLoadedLatencyMS {
-		failures = append(failures, fmt.Sprintf("upload-loaded latency %.1f ms > %.1f ms", q.UploadLoadedLatencyMS, limits.MaxLoadedLatencyMS))
-	}
-	if q.DownloadLoadedJitterMS > limits.MaxLoadedJitterMS {
-		failures = append(failures, fmt.Sprintf("download-loaded jitter %.1f ms > %.1f ms", q.DownloadLoadedJitterMS, limits.MaxLoadedJitterMS))
-	}
-	if q.UploadLoadedJitterMS > limits.MaxLoadedJitterMS {
-		failures = append(failures, fmt.Sprintf("upload-loaded jitter %.1f ms > %.1f ms", q.UploadLoadedJitterMS, limits.MaxLoadedJitterMS))
-	}
-	return len(failures) == 0, strings.Join(failures, "; ")
-}
-
-func gamingQualityLiveDetail(q check.NetworkQuality, passed bool, reason string) string {
-	status := "CANDIDATE 🎮"
-	if !passed {
-		status = "NO MARK"
-	}
-	detail := fmt.Sprintf(
-		"Gaming %s | idle %.1f/%.1f ms | loaded↓ %.1f/%.1f ms | loaded↑ %.1f/%.1f ms | packet loss: n/a",
-		status, q.LatencyMS, q.JitterMS,
-		q.DownloadLoadedLatencyMS, q.DownloadLoadedJitterMS,
-		q.UploadLoadedLatencyMS, q.UploadLoadedJitterMS,
-	)
-	if reason != "" {
-		detail += " | " + reason
-	}
-	return detail
-}
-
-func writeGamingQualityReport(dir string, nodes []sub.Node) error {
-	var buffer bytes.Buffer
-	writer := csv.NewWriter(&buffer)
-	if err := writer.Write([]string{
-		"name", "protocol", "tested", "gaming_candidate",
-		"latency_ms", "jitter_ms",
-		"download_loaded_latency_ms", "download_loaded_jitter_ms",
-		"upload_loaded_latency_ms", "upload_loaded_jitter_ms",
-		"packet_loss", "result",
-	}); err != nil {
-		return err
-	}
-	for _, n := range nodes {
-		reportName := qualityMarkedName(n.Name, false, n.GamingPassed)
-		row := []string{
-			reportName, protocolOf(n),
-			strconv.FormatBool(n.GamingTested),
-			strconv.FormatBool(n.GamingPassed),
-			strconv.FormatFloat(n.GamingLatencyMS, 'f', 2, 64),
-			strconv.FormatFloat(n.GamingJitterMS, 'f', 2, 64),
-			strconv.FormatFloat(n.GamingDownloadLoadedLatencyMS, 'f', 2, 64),
-			strconv.FormatFloat(n.GamingDownloadLoadedJitterMS, 'f', 2, 64),
-			strconv.FormatFloat(n.GamingUploadLoadedLatencyMS, 'f', 2, 64),
-			strconv.FormatFloat(n.GamingUploadLoadedJitterMS, 'f', 2, 64),
-			"not_measured", n.GamingError,
-		}
-		if err := writer.Write(row); err != nil {
-			return err
-		}
-	}
-	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return err
-	}
-	return writeAtomic(filepath.Join(dir, "gaming-quality.csv"), buffer.Bytes())
-}
 
 func urlStageNodeName(country string) string {
 	return urlStageNodeNameWithFormat(country, "full")
@@ -2407,56 +2208,44 @@ func markGeminiNodes(nodes []sub.Node) error {
 	return nil
 }
 
-const gamingNameSuffix = " 🎮"
-
-// qualityMarkedName keeps quality markers mutually exclusive. A gaming marker
-// always takes precedence over the less-specific stability marker.
-func qualityMarkedName(name string, stable, gaming bool) string {
+// stabilityMarkedName strips markers from earlier versions before applying the current streak.
+func stabilityMarkedName(name string, stable bool) string {
 	name = strings.TrimSpace(name)
 	hasGemini := strings.HasSuffix(name, geminiNameSuffix)
 	if hasGemini {
 		name = strings.TrimSpace(strings.TrimSuffix(name, geminiNameSuffix))
 	}
-	// Always strip old quality suffixes first. The current cycle's measured
-	// quality decides which marker remains; stale 🎮/🧱 labels never persist.
-	for {
-		switch {
-		case strings.HasSuffix(name, gamingNameSuffix):
-			name = strings.TrimSpace(strings.TrimSuffix(name, gamingNameSuffix))
-		case strings.HasSuffix(name, stabilityNameSuffix):
-			name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
-		default:
-			if gaming {
-				name += gamingNameSuffix
-			} else if stable {
-				name += stabilityNameSuffix
-			}
-			if hasGemini {
-				name += geminiNameSuffix
-			}
-			return name
+	for _, suffix := range []string{" 🎮", stabilityNameSuffix} {
+		for strings.HasSuffix(name, suffix) {
+			name = strings.TrimSpace(strings.TrimSuffix(name, suffix))
 		}
 	}
+	if stable {
+		name += stabilityNameSuffix
+	}
+	if hasGemini {
+		name += geminiNameSuffix
+	}
+	return name
 }
 
-func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int, gaming map[string]bool) error {
+func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int) error {
 	for i := range nodes {
-		key := nodeIdentity(nodes[i])
-		stable := streaks[key] >= stableConsecutiveCycles
-		name := qualityMarkedName(nodes[i].Name, stable, gaming[key])
+		stable := streaks[nodeIdentity(nodes[i])] >= stableConsecutiveCycles
+		name := stabilityMarkedName(nodes[i].Name, stable)
 		if name == nodes[i].Name {
 			continue
 		}
 		if err := sub.RenameNode(&nodes[i], name); err != nil {
-			return fmt.Errorf("rename quality marker for node %s: %w", nodes[i].Protocol, err)
+			return fmt.Errorf("rename stability marker for node %s: %w", nodes[i].Protocol, err)
 		}
 	}
 	return nil
 }
 
-func writeStabilityResults(dir string, allNodes, urlNodes, speedNodes, geminiNodes []sub.Node, streaks map[string]int, gaming map[string]bool) error {
+func writeStabilityResults(dir string, allNodes, urlNodes, speedNodes, geminiNodes []sub.Node, streaks map[string]int) error {
 	for _, group := range [][]sub.Node{allNodes, urlNodes, speedNodes, geminiNodes} {
-		if err := applyStabilityMarkers(group, streaks, gaming); err != nil {
+		if err := applyStabilityMarkers(group, streaks); err != nil {
 			return err
 		}
 	}
