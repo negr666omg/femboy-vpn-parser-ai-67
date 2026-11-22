@@ -768,21 +768,22 @@ func TestBuildSubscriptionSourceStatsSeparatesExclusiveAndSharedNodes(t *testing
 
 func TestPrintSubscriptionQualitySummaryRanksByExclusiveResultsAndRedactsURLSecrets(t *testing.T) {
 	sources := []loadedSource{
-		{Reference: "https://user:secret@source-a.example/sub?token=hidden", Line: 1},
-		{Reference: "https://source-b.example/sub?token=also-hidden", Line: 2},
+		{Reference: "https://user:secret@source-a.example/sub?token=hidden", Line: 1, ListPath: "feeds.list"},
+		{Reference: "https://source-b.example/sub?token=also-hidden", Line: 2, ListPath: "feeds.list"},
 	}
 	perSource := [][]sub.Node{
-		{{Key: "a-only"}, {Key: "shared"}},
-		{{Key: "b-only-1"}, {Key: "b-only-2"}, {Key: "shared"}},
+		{{Key: "a-only-1"}, {Key: "a-only-2"}, {Key: "shared"}},
+		{{Key: "b-only"}, {Key: "shared"}},
 	}
-	urlPassed := []sub.Node{{Key: "a-only"}, {Key: "b-only-1"}, {Key: "b-only-2"}, {Key: "shared"}}
+	urlPassed := []sub.Node{{Key: "a-only-1"}, {Key: "a-only-2"}, {Key: "b-only"}, {Key: "shared"}}
+	speedPassed := []sub.Node{{Key: "b-only"}}
 	var output bytes.Buffer
-	printSubscriptionQualitySummary(&output, sources, perSource, urlPassed, nil, nil)
+	printSubscriptionQualitySummary(&output, sources, perSource, urlPassed, speedPassed, nil)
 	got := output.String()
-	first := strings.Index(got, "1. source-b.example [sources.txt:2]")
-	second := strings.Index(got, "2. source-a.example [sources.txt:1]")
+	first := strings.Index(got, "1. source-b.example [feeds.list:2]")
+	second := strings.Index(got, "2. source-a.example [feeds.list:1]")
 	if first < 0 || second <= first {
-		t.Fatalf("sources should rank by exclusive URL-passed configs, not copied shared configs:\n%s", got)
+		t.Fatalf("sources should rank by exclusive speed-passed configs, not copied shared configs:\n%s", got)
 	}
 	for _, secret := range []string{"user:secret", "token=hidden", "also-hidden"} {
 		if strings.Contains(got, secret) {
@@ -791,7 +792,7 @@ func TestPrintSubscriptionQualitySummaryRanksByExclusiveResultsAndRedactsURLSecr
 	}
 	for _, want := range []string{
 		"Source occurrences: 5 | globally unique enabled configs: 4 | repeated appearances: 1 | configs shared by sources: 1",
-		"Source-exclusive (3): URL 3/3 (100.0%) -> speed 0/3 (0.0%)",
+		"Source-exclusive (3): URL 3/3 (100.0%) -> speed 1/3 (33.3%)",
 		"Shared globally (1, counted once): URL 1/1 (100.0%)",
 	} {
 		if !strings.Contains(got, want) {
