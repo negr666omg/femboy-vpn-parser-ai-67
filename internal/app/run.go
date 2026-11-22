@@ -470,6 +470,26 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 			opts.NetworkNamespaceInterface = ns.HostInterface()
 			opts.NetworkNamespaceProxyIP = ns.ProxyIP
 			opts.NetworkNamespaceHostIP = ns.HostIP
+
+			// Prove that the namespace itself can resolve and reach the configured
+			// URL directly before starting thousands of independent proxy tests.
+			probeTimeout := opts.URLTimeout
+			if probeTimeout > 15*time.Second {
+				probeTimeout = 15 * time.Second
+			}
+			if probeTimeout < 3*time.Second {
+				probeTimeout = 3 * time.Second
+			}
+			var probeLog bytes.Buffer
+			probeOutput := io.MultiWriter(stdout, &probeLog)
+			fmt.Fprintf(stdout, "[network] direct egress preflight through %s (before proxy tests)\\n", opts.Interface)
+			probeErr := ns.Preflight(ctx, opts.URL, probeTimeout, probeOutput)
+			if writeErr := os.WriteFile(filepath.Join(opts.OutDir, "network-preflight.log"), probeLog.Bytes(), 0600); writeErr != nil {
+				fmt.Fprintf(stderr, "failed to save network preflight log: %v\\n", writeErr)
+			}
+			if probeErr != nil {
+				return fmt.Errorf("network preflight failed; all proxy tests were skipped: %w", probeErr)
+			}
 		}
 	}
 
@@ -2234,7 +2254,16 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 		return err
 	}
 	defer check.CloseClient(client)
-	return fn(parent, client)
+	testErr := fn(parent, client)
+	if testErr != nil {
+		// Stop sing-box before reading its capped stderr buffer so any final
+		// process-level error is included in the node's failure record.
+		inst.Close()
+		if detail := inst.Diagnostics(); detail != "" {
+			return fmt.Errorf("%w (sing-box stderr: %s)", testErr, detail)
+		}
+	}
+	return testErr
 }
 
 // withNodeProxy exposes the local sing-box HTTP CONNECT endpoint so Gemini can
@@ -2264,7 +2293,7 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
 		"all.txt", "failed.txt", "gaming-quality.txt", "gaming-quality.csv", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "speedtested.txt",
-		"url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
+		"url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt", "network-preflight.log",
 		"speed-test-finished.txt", "speed-test-report.csv", "cloudflare-fallback-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
