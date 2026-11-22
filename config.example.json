@@ -16,6 +16,9 @@
   },
   "speed_test": {
     "provider": "cloudflare",
+    "cloudflare_fallback": {
+      "enabled": false
+    },
     "concurrency": 4,
     "timeout": "85s",
     "first_byte_timeout": "10s",
