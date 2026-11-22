@@ -521,8 +521,10 @@ func proxySubnetReservations(routes string, interfaceAddresses []string) []*net.
 	return result
 }
 
-// parseLinkRouteNetworks extracts only destinations that iproute2 marks as
-// directly connected. Ordinary unicast routes via a gateway are left alone.
+// parseLinkRouteNetworks extracts only exact /30-or-smaller address blocks
+// marked scope link. Broader connected prefixes are safe to override with the
+// veth's more-specific /30 route; assigned interface prefixes are reserved
+// separately from Interface.Addrs. Ordinary gateway routes are ignored.
 func parseLinkRouteNetworks(routes string) []*net.IPNet {
 	var result []*net.IPNet
 	routeTypes := map[string]bool{
@@ -556,6 +558,10 @@ func parseLinkRouteNetworks(routes string) []*net.IPNet {
 			continue
 		}
 		if _, network, err := net.ParseCIDR(destination); err == nil && network.IP.To4() != nil {
+			ones, _ := network.Mask.Size()
+			if ones < 30 {
+				continue
+			}
 			network.IP = network.IP.To4()
 			result = append(result, network)
 		} else if ip := net.ParseIP(destination); ip != nil && ip.To4() != nil {
