@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,7 @@ type Instance struct {
 	done     chan error
 	tmpDir   string
 	stderr   *cappedLog
+	closeOnce sync.Once
 }
 
 func FindOrDownload(binary string) (string, error) {
@@ -350,14 +352,16 @@ func (i *Instance) Close() {
 	if i == nil {
 		return
 	}
-	if i.cmd != nil && i.cmd.Process != nil {
-		_ = i.cmd.Process.Kill()
-		select {
-		case <-i.done:
-		case <-time.After(time.Second):
+	i.closeOnce.Do(func() {
+		if i.cmd != nil && i.cmd.Process != nil {
+			_ = i.cmd.Process.Kill()
+			select {
+			case <-i.done:
+			case <-time.After(time.Second):
+			}
 		}
-	}
-	if i.tmpDir != "" {
-		_ = os.RemoveAll(i.tmpDir)
-	}
+		if i.tmpDir != "" {
+			_ = os.RemoveAll(i.tmpDir)
+		}
+	})
 }
