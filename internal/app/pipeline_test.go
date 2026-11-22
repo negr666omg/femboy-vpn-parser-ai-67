@@ -1228,7 +1228,7 @@ func TestSpeedTestReportContainsIndependentProviderColumns(t *testing.T) {
 	for _, expected := range []string{
 		"ookla_tested", "ookla_passed", "ookla_download_mbps", "ookla_error",
 		"cloudflare_tested", "cloudflare_passed", "cloudflare_download_mbps", "cloudflare_error",
-		"false,false,4.00,12.00,download below threshold,true,true,30.00,20.00",
+		"true,false,4.00,12.00,download below threshold,true,true,30.00,20.00",
 	} {
 		if !strings.Contains(string(data), expected) {
 			t.Fatalf("speed test report is missing %q: %s", expected, data)
