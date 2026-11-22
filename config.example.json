@@ -41,6 +41,7 @@
     "rename_nodes": true,
     "geoip_url": "https://ipwho.is/",
     "name_format": "{flag} {country} {download}↓{upload}↑",
+    "country_format": "full",
     "speed_decimals": 1
   },
   "output": {
