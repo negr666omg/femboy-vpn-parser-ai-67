@@ -26,7 +26,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
   "protocols":{"enabled":["vless","shadowsocks"]},
   "url_test":{"url":"https://example.com/204","concurrency":6,"timeout":"9s"},
   "speed_test":{"provider":"ookla","concurrency":3,"timeout":"45s","first_byte_timeout":"6s","max_duration":"17s","sample_interval":"500ms","min_download_mbps":7,"min_upload_mbps":4,"download_bytes":1048576,"upload_bytes":524288,"download_url":"https://download.example/file?size={bytes}","upload_url":"https://upload.example/test"},
-  "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json","name_format":"{flag} {download}↓{upload}↑","speed_decimals":2},
+  "service_check":{"concurrency":2,"timeout":"20s","lookup_ip":true,"rename_nodes":true,"geoip_url":"https://geo.example/json","name_format":"{flag} {download}↓{upload}↑","country_format":"code","speed_decimals":2},
   "final_check":{"enabled":false,"concurrency":1,"timeout":"8s"},
   "output":{"directory":"results","split_by_protocol":true,"subscription_text":false,"gemini_file":false}
 }`
@@ -49,7 +49,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
 		t.Fatalf("protocol aliases not normalized: %#v", opts.Protocols)
 	}
-	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText || opts.GeminiFile {
+	if opts.MinDownload != 7 || opts.MinUpload != 4 || !opts.LookupIP || !opts.RenameNodes || opts.GeoIPURL != "https://geo.example/json" || opts.NameFormat != "{flag} {download}↓{upload}↑" || opts.CountryFormat != "code" || opts.SpeedDecimals != 2 || !opts.SplitByProtocol || opts.WriteText || opts.GeminiFile {
 		t.Fatalf("unexpected stage settings: %+v", opts)
 	}
 	if opts.SpeedProvider != "ookla" { t.Fatalf("speed provider = %q, want ookla", opts.SpeedProvider) }
@@ -77,6 +77,28 @@ func TestLoopIntervalMustBeNonNegativeDuration(t *testing.T) {
 func TestDefaultCycleIntervalIsDisabled(t *testing.T) {
 	if got := DefaultOptions().CycleInterval; got != 0 {
 		t.Fatalf("default cycle interval = %s, want 0", got)
+	}
+}
+
+func TestCountryFormatRejectsUnknownValues(t *testing.T) {
+	for _, value := range []string{"short", "uppercase", "true"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			data := `{"service_check":{"country_format":"` + value + `"}}`
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "service_check.country_format") {
+				t.Fatalf("expected invalid country_format error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDefaultCountryFormatIsFullName(t *testing.T) {
+	if got := DefaultOptions().CountryFormat; got != "full" {
+		t.Fatalf("default country format = %q, want full", got)
 	}
 }
 
@@ -1059,6 +1081,41 @@ func TestURLStageExportsCountryNameWithoutUnmeasuredSpeed(t *testing.T) {
 	}
 	if strings.Contains(exported.Name, "↓") || strings.Contains(exported.Name, "↑") {
 		t.Fatalf("URL-stage name contains speed that has not been measured: %q", exported.Name)
+	}
+}
+
+func TestCountryNameFormats(t *testing.T) {
+	tests := []struct {
+		code, format, want string
+	}{
+		{"CN", "full", "🇨🇳 China"},
+		{"CN", "code", "🇨🇳 CN"},
+		{"RU", "code", "🇷🇺 RU"},
+		{"RU", "none", "🇷🇺"},
+	}
+	for _, test := range tests {
+		if got := urlStageNodeNameWithFormat(test.code, test.format); got != test.want {
+			t.Errorf("urlStageNodeNameWithFormat(%q, %q) = %q, want %q", test.code, test.format, got, test.want)
+		}
+	}
+}
+
+func TestFinalNodeNameCountryFormats(t *testing.T) {
+	template := "{flag} {country} {download}↓{upload}↑"
+	tests := []struct {
+		format, want string
+	}{
+		{"full", "🇨🇳 China 72↓32↑"},
+		{"code", "🇨🇳 CN 72↓32↑"},
+		{"none", "🇨🇳 72↓32↑"},
+	}
+	for _, test := range tests {
+		if got := renderNodeNameWithCountryFormat(template, "CN", 72.4, 31.6, test.format); got != test.want {
+			t.Errorf("renderNodeNameWithCountryFormat(%q) = %q, want %q", test.format, got, test.want)
+		}
+	}
+	if got := renderNodeNameWithCountryFormat("{flag} {download}↓{upload}↑", "CN", 72.4, 31.6, "none"); got != "🇨🇳 72↓32↑" {
+		t.Fatalf("none mode unexpectedly inserted a country: %q", got)
 	}
 }
 

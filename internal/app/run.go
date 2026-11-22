@@ -1650,8 +1650,27 @@ func runSpeedTestWithProviderProgress(parent context.Context, n sub.Node, opts O
 
 
 func urlStageNodeName(country string) string {
-	flag, name := countryLabel(country)
-	return flag + " " + name
+	return urlStageNodeNameWithFormat(country, "full")
+}
+
+func urlStageNodeNameWithFormat(country, format string) string {
+	flag, name := countryLabelForFormat(country, format)
+	return strings.TrimSpace(flag + " " + name)
+}
+
+func countryLabelForFormat(country, format string) (string, string) {
+	flag, fullName := countryLabel(country)
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "none":
+		return flag, ""
+	case "code":
+		if flag == "🌐" {
+			return flag, fullName
+		}
+		return flag, strings.ToUpper(strings.TrimSpace(country))
+	default:
+		return flag, fullName
+	}
 }
 
 // countryLabel converts a two-letter ISO code into a stable flag and English
@@ -1685,14 +1704,21 @@ func ensureCountryPlaceholder(template string) string {
 }
 
 func renderNodeName(template, country string, download, upload float64) string {
-	flag, countryName := countryLabel(country)
-	template = ensureCountryPlaceholder(template)
-	return strings.NewReplacer(
+	return renderNodeNameWithCountryFormat(template, country, download, upload, "full")
+}
+
+func renderNodeNameWithCountryFormat(template, country string, download, upload float64, format string) string {
+	flag, countryName := countryLabelForFormat(country, format)
+	if strings.ToLower(strings.TrimSpace(format)) != "none" {
+		template = ensureCountryPlaceholder(template)
+	}
+	name := strings.NewReplacer(
 		"{flag}", flag,
 		"{country}", countryName,
 		"{download}", formatMbps(download, 0),
 		"{upload}", formatMbps(upload, 0),
 	).Replace(template)
+	return strings.Join(strings.Fields(name), " ")
 }
 
 func renameNodeAfterURL(parent context.Context, n *sub.Node, opts Options) string {
@@ -1700,7 +1726,7 @@ func renameNodeAfterURL(parent context.Context, n *sub.Node, opts Options) strin
 		return "cannot rename a nil node"
 	}
 	countryErr := ensureNodeCountry(parent, n, opts)
-	name := urlStageNodeName(n.Country)
+	name := urlStageNodeNameWithFormat(n.Country, opts.CountryFormat)
 	if err := sub.RenameNode(n, name); err != nil {
 		return err.Error()
 	}
@@ -1719,7 +1745,7 @@ func renameNodeAfterSpeed(parent context.Context, n *sub.Node, opts Options, dow
 	if template == "" {
 		template = DefaultOptions().NameFormat
 	}
-	name := renderNodeName(template, n.Country, download, upload)
+	name := renderNodeNameWithCountryFormat(template, n.Country, download, upload, opts.CountryFormat)
 	if strings.TrimSpace(name) == "" {
 		return "service_check.name_format produced an empty node name"
 	}
