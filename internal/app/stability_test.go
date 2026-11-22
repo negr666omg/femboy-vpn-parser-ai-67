@@ -65,6 +65,7 @@ func TestStabilityMarkerIsPlacedBeforeGeminiAndRemovedWhenUnstable(t *testing.T)
 		{name: base + geminiNameSuffix, stable: true, want: base + " 🧱" + geminiNameSuffix},
 		{name: base + " 🧱" + geminiNameSuffix, stable: false, want: base + geminiNameSuffix},
 		{name: base + " 🧱", stable: true, want: base + " 🧱"},
+		{name: base + " 🧱 🧱", stable: true, want: base + " 🧱"},
 	}
 	for _, tc := range cases {
 		if got := stabilityMarkedName(tc.name, tc.stable); got != tc.want {
