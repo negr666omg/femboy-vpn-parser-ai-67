@@ -261,6 +261,14 @@ func selectedInterfaceRoute(ctx context.Context, iface *net.Interface) (net.IP, 
 	}
 	gateway, source, err := parseDefaultRoute(string(out))
 	if err != nil {
+		// Some VPN/network managers keep the physical interface's gateway in
+		// a non-main table. Search all tables before declaring it unavailable.
+		allRoutes, routeErr := exec.CommandContext(ctx, "ip", "-4", "route", "show", "table", "all").CombinedOutput()
+		if routeErr == nil {
+			gateway, source, err = parseDefaultRouteForInterface(string(allRoutes), iface.Name)
+		}
+	}
+	if err != nil {
 		return nil, "", "", fmt.Errorf("network interface %q has no IPv4 default route; connect it to a network with a gateway: %w", iface.Name, err)
 	}
 	for _, addr := range addresses {
@@ -269,6 +277,21 @@ func selectedInterfaceRoute(ctx context.Context, iface *net.Interface) (net.IP, 
 		}
 	}
 	return nil, "", "", fmt.Errorf("default route through %s selects source %s, but that address is not assigned to the interface", iface.Name, source)
+}
+
+func parseDefaultRouteForInterface(routes, iface string) (gateway, source string, err error) {
+	for _, line := range strings.Split(routes, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "default" {
+			continue
+		}
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "dev" && fields[i+1] == iface {
+				return parseDefaultRoute(line)
+			}
+		}
+	}
+	return "", "", fmt.Errorf("no default route found for interface %s", iface)
 }
 
 func parseDefaultRoute(routes string) (gateway, source string, err error) {
