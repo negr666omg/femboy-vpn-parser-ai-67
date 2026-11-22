@@ -120,7 +120,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) (runErr er
 	}
 	failures := newRunFailureLog()
 	defer func() {
-		if runErr != nil {
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
 			failures.Add("PROGRAM", runErr.Error())
 		}
 		if err := failures.Write(filepath.Join(opts.OutDir, "failed.txt")); err != nil {
