@@ -18,7 +18,7 @@ import (
 	"github.com/negr666omg/subwatch/internal/core"
 )
 
-const version = "0.5.6"
+const version = "0.5.7"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -65,8 +65,8 @@ func run(args []string) error {
 		return app.FetchSourceCommand(*timeout)
 	case "__network-probe":
 		fs := flag.NewFlagSet("__network-probe", flag.ContinueOnError)
-		target := fs.String("url", "", "direct HTTP preflight target")
-		timeout := fs.Duration("timeout", 10*time.Second, "preflight timeout")
+		tcpTargets := fs.String("tcp-targets", "", "comma-separated proxy server:port endpoints")
+		timeout := fs.Duration("timeout", 12*time.Second, "preflight timeout")
 		if err := fs.Parse(args); err != nil {
 			if errors.Is(err, flag.ErrHelp) {
 				return nil
@@ -76,7 +76,7 @@ func run(args []string) error {
 		if fs.NArg() != 0 {
 			return fmt.Errorf("__network-probe does not accept positional arguments")
 		}
-		return core.RunNetworkProbe(*target, *timeout, os.Stdout)
+		return core.RunNetworkTCPProbe(*tcpTargets, *timeout, os.Stdout)
 	case "interfaces":
 		if len(args) > 0 {
 			return fmt.Errorf("interfaces does not accept options")
