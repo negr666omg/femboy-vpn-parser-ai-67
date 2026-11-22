@@ -61,6 +61,58 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	}
 }
 
+func TestConfigLoadsOoklaCloudflareFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	data := `{
+  "speed_test": {
+    "provider": "ookla",
+    "cloudflare_fallback": true,
+    "timeout": "75s",
+    "first_byte_timeout": "7s",
+    "max_duration": "15s",
+    "sample_interval": "250ms",
+    "min_download_mbps": 9,
+    "min_upload_mbps": 5,
+    "download_bytes": 3145728,
+    "upload_bytes": 2097152,
+    "download_url": "https://cf.example/down?bytes={bytes}",
+    "upload_url": "https://cf.example/up"
+  }
+}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := LoadOptions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.SpeedProvider != "ookla" || !opts.CloudflareFallback {
+		t.Fatalf("Ookla + Cloudflare fallback was not enabled: %+v", opts)
+	}
+	if opts.FirstByteTimeout != 7*time.Second || opts.MaxSpeedDuration != 15*time.Second || opts.SpeedSampleInterval != 250*time.Millisecond {
+		t.Fatalf("Cloudflare fallback timeouts were not retained: %+v", opts)
+	}
+	if opts.DownloadBytes != 3145728 || opts.UploadBytes != 2097152 ||
+		opts.SpeedDownloadURL != "https://cf.example/down?bytes={bytes}" || opts.SpeedUploadURL != "https://cf.example/up" {
+		t.Fatalf("Cloudflare fallback endpoint settings were not retained: %+v", opts)
+	}
+	if opts.MinDownload != 9 || opts.MinUpload != 5 {
+		t.Fatalf("shared speed thresholds were not loaded: %+v", opts)
+	}
+}
+
+func TestCloudflareFallbackRequiresOoklaAsPrimaryProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"speed_test":{"provider":"cloudflare","cloudflare_fallback":true}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "cloudflare_fallback requires") {
+		t.Fatalf("expected provider validation error, got %v", err)
+	}
+}
+
 func TestSourceTimeoutMustBePositive(t *testing.T) {
 	for _, value := range []string{"0s", "-1s", "invalid"} {
 		t.Run(value, func(t *testing.T) {
@@ -344,6 +396,39 @@ func TestSpeedThresholdRequiresBothDirections(t *testing.T) {
 	}
 	if got := speedThresholdError(50, 1, 8, 8); got == "" || !strings.Contains(got, "upload") {
 		t.Fatalf("upload 1 Mbps must fail even when download is 50 Mbps: %q", got)
+	}
+}
+
+func TestCloudflareFallbackSelectsOnlyURLPassedOoklaFailures(t *testing.T) {
+	nodes := []sub.Node{
+		{Key: "ookla-failed", URLPassed: true, SpeedPassed: false},
+		{Key: "ookla-passed", URLPassed: true, SpeedPassed: true},
+		{Key: "url-failed", URLPassed: false, SpeedPassed: false},
+	}
+	candidates := cloudflareFallbackCandidates(nodes)
+	if len(candidates) != 1 || nodeDedupKey(candidates[0]) != "ookla-failed" {
+		t.Fatalf("fallback candidates = %#v, want only the URL-passed Ookla failure", candidates)
+	}
+}
+
+func TestReplaceNodesByIdentityMergesCloudflareFallbackResults(t *testing.T) {
+	nodes := []sub.Node{
+		{Key: "recovered", Protocol: "vless", Name: "before", URI: "vless://before", Outbound: map[string]any{"type": "vless"}},
+		{Key: "still-passed", Protocol: "ss", Name: "kept", URI: "ss://kept", Outbound: map[string]any{"type": "shadowsocks"}},
+	}
+	originals := []sub.Node{nodes[0]}
+	updates := []sub.Node{{
+		Key: "recovered", Protocol: "vless", Name: "Cloudflare recovered", URI: "vless://after",
+		URLPassed: true, SpeedPassed: true, DownloadMbps: 25, UploadMbps: 11,
+		Outbound: map[string]any{"type": "vless"},
+	}}
+	replaceNodesByIdentity(nodes, originals, updates)
+	if nodes[0].Name != "Cloudflare recovered" || nodes[0].URI != "vless://after" ||
+		!nodes[0].SpeedPassed || nodes[0].DownloadMbps != 25 || nodes[0].UploadMbps != 11 {
+		t.Fatalf("fallback result was not merged: %+v", nodes[0])
+	}
+	if nodes[1].Name != "kept" || nodes[1].URI != "ss://kept" {
+		t.Fatalf("unrelated Ookla success was changed: %+v", nodes[1])
 	}
 }
 
