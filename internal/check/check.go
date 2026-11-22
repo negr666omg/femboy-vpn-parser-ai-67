@@ -415,6 +415,32 @@ func collectCloudflareLatencyDuring(ctx context.Context, client *http.Client, ta
 	}()
 
 	samples := make([]float64, 0, 16)
+	// Take an early sample shortly after starting the transfer, then continue
+	// at the configured cadence. This gives short high-throughput transfers a
+	// chance to produce more than one loaded-latency point.
+	initialDelay := interval / 4
+	if initialDelay < time.Millisecond {
+		initialDelay = time.Millisecond
+	}
+	initial := time.NewTimer(initialDelay)
+	select {
+	case err := <-transferDone:
+		initial.Stop()
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("transfer completed before loaded-latency sampling began; increase gaming_test payload size")
+	case <-ctx.Done():
+		initial.Stop()
+		return nil, ctx.Err()
+	case <-initial.C:
+	}
+	sample, err := cloudflareLatencySample(loadCtx, client, target)
+	if err != nil {
+		return nil, fmt.Errorf("initial loaded sample: %w", err)
+	}
+	samples = append(samples, sample)
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
