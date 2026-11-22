@@ -306,3 +306,19 @@ func mustCIDR(t *testing.T, value string) *net.IPNet {
 	}
 	return network
 }
+
+func TestNamespaceEgressPolicyUsesSourceAddress(t *testing.T) {
+	got := strings.Join(namespaceEgressRuleArgs("add", "10.0.168.194", 86336), " ")
+	want := "ip -4 rule add pref 0 from 10.0.168.194/32 lookup 86336"
+	if got != want {
+		t.Fatalf("egress rule = %q, want %q", got, want)
+	}
+}
+
+func TestNamespaceRouteLookupUsesSourcePolicyWithoutIIF(t *testing.T) {
+	got := strings.Join(namespaceRouteLookupArgs("10.0.168.194"), " ")
+	want := "-4 route get 1.1.1.1 from 10.0.168.194"
+	if got != want {
+		t.Fatalf("route lookup = %q, want %q", got, want)
+	}
+}
