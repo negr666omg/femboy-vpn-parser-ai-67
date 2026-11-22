@@ -425,67 +425,30 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
 	}
 
-	liveMouse := newLiveTerminalMouse(stdout)
-	if liveMouse != nil {
-		defer liveMouse.Close()
-		fmt.Fprintln(stdout, "[live] click a source or config name to copy it to the clipboard")
-	}
 	var sourceProgressRendered bool
-	var sourceProgressMouseRow int
-	var sourceProgressMouseRowQueried bool
 	renderSourceProgress := func(progress sourceProgress) {
 		sourceProgressRendered = true
 		line := formatSourceProgressLine(progress, liveTerminalWidth(stdout))
 		fmt.Fprintf(stdout, "\r\x1b[2K%s", line)
-		if liveMouse != nil {
-			if !sourceProgressMouseRowQueried {
-				sourceProgressMouseRowQueried = true
-				if row, ok := liveMouse.cursorRow(); ok {
-					sourceProgressMouseRow = row
-				} else {
-					// Do not leave mouse reporting enabled on terminals that do
-					// not answer cursor-position requests; selection must still work.
-					liveMouse.Close()
-					liveMouse = nil
-				}
-			}
-			if sourceProgressMouseRow > 0 {
-				head := "[PARSE]"
-				if progress.Total > 0 {
-					head = fmt.Sprintf("[PARSE %d/%d ok:%d skip:%d]", progress.Index, progress.Total, progress.Loaded, progress.Skipped)
-				}
-				startCol, endCol, ok := liveTitleClickRange(line, head)
-				if ok {
-					liveMouse.setTargets([]liveMouseTarget{{
-						row: sourceProgressMouseRow, startCol: startCol, endCol: endCol,
-						copyText: strings.TrimSpace(progress.Reference),
-					}})
-				} else {
-					liveMouse.setTargets(nil)
-				}
-			}
-		}
 	}
 	renderSourceProgress(sourceProgress{Reference: opts.Sources, Phase: "reading source list"})
 
-	var sources []loadedSource
-	var err error
+	var fetch sourceFetcher
 	if sourceNamespace != nil {
 		executable, exeErr := os.Executable()
 		if exeErr != nil {
 			return fmt.Errorf("locate SubWatch executable for isolated source downloads: %w", exeErr)
 		}
-		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, func(fetchCtx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
-			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL, timeout)
-		}, renderSourceProgress, opts.RetryOnConnectionError)
+		fetch = sourceFetcherForNamespace(sourceNamespace, executable)
 	} else {
-		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetchHTTPSource, renderSourceProgress, opts.RetryOnConnectionError)
+		fetch = sourceFetcherForNamespace(nil, "")
+		fmt.Fprintln(stdout, "[network] remote subscription downloads use the host network (isolate_source_downloads=false)")
 	}
+	var err error
+	sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetch, renderSourceProgress, opts.RetryOnConnectionError)
 	if sourceProgressRendered {
 		fmt.Fprintln(stdout)
 		sourceProgressRendered = false
-		sourceProgressMouseRow = 0
-		sourceProgressMouseRowQueried = false
 	}
 	if err != nil {
 		return err
@@ -560,9 +523,6 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	if sourceProgressRendered {
 		fmt.Fprintln(stdout)
-	}
-	if liveMouse != nil {
-		liveMouse.setTargets(nil)
 	}
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
@@ -681,7 +641,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
 		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
-	}, opts.LiveDisplayMode, liveMouse)
+	}, opts.LiveDisplayMode)
 	if stageErr != nil {
 		return stageErr
 	}
@@ -751,7 +711,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
 		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
-	}, opts.LiveDisplayMode, liveMouse)
+	}, opts.LiveDisplayMode)
 	if stageErr != nil {
 		return stageErr
 	}
@@ -812,7 +772,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
 		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
-	}, opts.LiveDisplayMode, liveMouse)
+	}, opts.LiveDisplayMode)
 	if stageErr != nil {
 		return stageErr
 	}
@@ -1184,8 +1144,7 @@ func sourceURLForDisplay(reference string) string {
 		return cleanLiveText(reference)
 	}
 	// Never expose URL userinfo or obvious access-token query parameters in
-	// the live terminal line. The clickable copy action still copies the exact
-	// original source reference, including its authentication data.
+	// the live terminal line.
 	parsed.User = nil
 	if parsed.RawQuery != "" {
 		parts := strings.Split(parsed.RawQuery, "&")
@@ -1601,22 +1560,15 @@ func runStageWithCallback(ctx context.Context, label string, nodes []sub.Node, c
 	}, onComplete)
 }
 
-// runStageWithLiveCallback maintains exactly one mutable terminal status line.
+// runStageWithLiveCallback maintains independently updated worker status rows.
 // Concurrent workers may test multiple nodes, but only the most recently
 // started node owns the visible line; older workers cannot overwrite it later.
-func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error, mouseArgs ...*liveTerminalMouse) ([]sub.Node, error) {
-	return runStageWithLiveCallbackMode(ctx, label, nodes, concurrency, stdout, passed, test, onComplete, "immediate", mouseArgs...)
+func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error) ([]sub.Node, error) {
+	return runStageWithLiveCallbackMode(ctx, label, nodes, concurrency, stdout, passed, test, onComplete, "immediate")
 }
 
-func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error, displayMode string, mouseArgs ...*liveTerminalMouse) ([]sub.Node, error) {
+func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error, displayMode string) ([]sub.Node, error) {
 	deferredDisplay := displayMode == "after_result"
-	var mouse *liveTerminalMouse
-	if len(mouseArgs) > 0 {
-		mouse = mouseArgs[0]
-	}
-	if mouse != nil {
-		mouse.setTargets(nil)
-	}
 	results := make([]sub.Node, len(nodes))
 	if len(nodes) == 0 {
 		fmt.Fprintf(stdout, "[%s] 0/0 (nothing to test)\n", label)
@@ -1633,8 +1585,6 @@ func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub
 	var progressMu sync.Mutex
 	var callbackErr error
 	done, successes := 0, 0
-	terminalLastRow := 0
-	terminalRowsKnown := false
 	type workerStatus struct {
 		node   sub.Node
 		detail string
@@ -1669,32 +1619,6 @@ func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub
 				fmt.Fprintf(stdout, "\r\x1b[2K%s\n", line)
 			}
 			terminalRowsDrawn = true
-			if mouse != nil {
-				if !terminalRowsKnown {
-					if row, ok := mouse.cursorRow(); ok {
-						terminalLastRow = row
-						terminalRowsKnown = true
-					} else {
-						mouse.Close()
-						mouse = nil
-					}
-				}
-				if mouse != nil && terminalRowsKnown {
-					targets := make([]liveMouseTarget, 0, len(statuses))
-					for i, status := range statuses {
-						line := formatLiveWorkerStatusLine(label, i+1, status.node, status.detail, terminalWidth)
-						head := fmt.Sprintf("[%s worker %d]", label, i+1)
-						startCol, endCol, ok := liveTitleClickRange(line, head)
-						if ok && status.node.URI != "" {
-							targets = append(targets, liveMouseTarget{
-								row: terminalLastRow - concurrency + i,
-								startCol: startCol, endCol: endCol, copyText: status.node.URI,
-							})
-						}
-					}
-					mouse.setTargets(targets)
-				}
-			}
 			return
 		}
 
@@ -1773,9 +1697,6 @@ func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub
 	}
 	close(jobs)
 	workers.Wait()
-	if mouse != nil {
-		mouse.setTargets(nil)
-	}
 	if terminalWidth <= 0 {
 		fmt.Fprintln(stdout)
 	}
