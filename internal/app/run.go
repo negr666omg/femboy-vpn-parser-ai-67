@@ -557,8 +557,23 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) (runErr er
 		failures.AddNode("SPEED TEST", node, reason)
 	}
 	for _, node := range speedResults {
-		if node.OoklaTested && !node.OoklaPassed && node.CloudflareTested && node.CloudflarePassed {
-			failures.AddNode("RECOVERED BY CLOUDFLARE", node, "Ookla failed: "+node.OoklaError)
+		if node.OoklaTested && !node.OoklaPassed {
+			stage := "OOKLA"
+			if node.CloudflareTested && node.CloudflarePassed {
+				stage = "CLOUDFLARE RECOVERY"
+			}
+			reason := node.OoklaError
+			if reason == "" {
+				reason = "Ookla test failed"
+			}
+			failures.AddNode(stage, node, reason)
+		}
+		if node.CloudflareTested && !node.CloudflarePassed {
+			reason := node.CloudflareError
+			if reason == "" {
+				reason = "Cloudflare fallback failed"
+			}
+			failures.AddNode("CLOUDFLARE", node, reason)
 		}
 		if node.RenameError != "" {
 			failures.AddNode("RENAME", node, node.RenameError)
@@ -600,6 +615,15 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) (runErr er
 	for _, node := range serviceResults {
 		if node.ServiceError != "" {
 			failures.AddNode("SERVICE CHECK", node, node.ServiceError)
+		} else if !geminiAvailable(node) {
+			reason := strings.TrimSpace(node.GeminiStatus)
+			if node.GeminiNote != "" {
+				reason += ": " + node.GeminiNote
+			}
+			if reason == "" {
+				reason = "Gemini was not classified as available"
+			}
+			failures.AddNode("GEMINI", node, reason)
 		}
 	}
 	finalCandidates := filterNodes(serviceResults, func(n sub.Node) bool { return geminiAvailable(n) })
