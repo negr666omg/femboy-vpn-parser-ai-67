@@ -284,7 +284,8 @@ func TestNftRulesUseOnlyTheSelectedInterfaceAndNamespaceIP(t *testing.T) {
 	rules := ns.nftRules("enp1s0")
 	for _, want := range []string{
 		"table ip subwatch123",
-		"iifname \"swh123\" oifname \"enp1s0\" ip saddr 10.254.12.2",
+		"iifname \"swh123\" ip saddr 10.254.12.2 oifname != \"enp1s0\" counter drop",
+		"iifname \"swh123\" oifname \"enp1s0\" ip saddr 10.254.12.2 counter accept",
 		"iifname \"enp1s0\" oifname \"swh123\" ip daddr 10.254.12.2 ct state established,related",
 		"oifname \"enp1s0\" ip saddr 10.254.12.2 counter masquerade",
 	} {
