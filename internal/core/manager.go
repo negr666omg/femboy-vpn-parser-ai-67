@@ -212,7 +212,7 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	listenAddr := "127.0.0.1"
-	namespaceName, proxyInterface := "", ""
+	namespaceName, proxyInterface, proxyIP, proxyHostIP := "", "", "", ""
 	if len(namespace) > 0 {
 		namespaceName = namespace[0]
 		if namespaceName != "" {
@@ -222,9 +222,19 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 	if len(namespace) > 1 {
 		proxyInterface = namespace[1]
 	}
+	if len(namespace) > 2 && namespace[2] != "" {
+		proxyIP = namespace[2]
+		listenAddr = proxyIP
+	}
+	if len(namespace) > 3 {
+		proxyHostIP = namespace[3]
+	}
 	var proxyDialer *net.Dialer
 	if namespaceName != "" {
-		proxyDialer = namespaceProxyDialer(proxyInterface)
+		if proxyHostIP == "" {
+			proxyHostIP = "10.254.0.1"
+		}
+		proxyDialer = namespaceProxyDialer(proxyInterface, proxyHostIP)
 	}
 	out := make(map[string]any, len(outbound)+1)
 	for k, v := range outbound {
