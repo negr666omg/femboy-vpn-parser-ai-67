@@ -231,7 +231,7 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	if err := ns.verifyEgressRoute(ctx); err != nil {
 		return fail(err)
 	}
-	fmt.Fprintf(output, "[network] verified kernel route: namespace traffic uses %s (policy priority %d)\\n", it.Name, namespacePolicyPriority)
+	fmt.Fprintf(output, "[network] verified kernel route: namespace traffic uses %s (source policy priority %d)\n", it.Name, namespacePolicyPriority)
 
 	if err := ns.enableForwarding(ctx); err != nil {
 		return fail(fmt.Errorf("enable temporary IPv4 forwarding: %w", err))
