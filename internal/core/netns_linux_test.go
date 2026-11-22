@@ -84,18 +84,24 @@ func TestParseRouteNetworksUsesOnlyDestinationField(t *testing.T) {
 		"broadcast 192.168.1.255 dev enp1s0 table local",
 	}, "\n")
 	parsed := parseRouteNetworks(routes)
-	if len(parsed) != 4 {
-		t.Fatalf("parsed %d destination routes, want 4: %#v", len(parsed), parsed)
+	if len(parsed) != 5 {
+		t.Fatalf("parsed %d destination routes, want 5: %#v", len(parsed), parsed)
 	}
+	hasGatewayHostRoute := false
+	hasLocalHostRoute := false
 	for _, route := range parsed {
-		if route.Contains(net.ParseIP("192.168.1.75")) && route.String() == "192.168.1.75/32" {
-			t.Fatal("default route gateway was incorrectly treated as a reserved destination")
+		if route.String() == "192.168.1.75/32" {
+			hasGatewayHostRoute = true
 		}
-		if route.Contains(net.ParseIP("192.168.1.87")) && route.String() == "192.168.1.87/32" {
-			// This address is valid because it is explicitly the destination
-			// of the "local" route, not merely the source address of default.
-			continue
+		if route.String() == "192.168.1.87/32" {
+			hasLocalHostRoute = true
 		}
+	}
+	if hasGatewayHostRoute {
+		t.Fatal("default route gateway was incorrectly treated as a reserved destination")
+	}
+	if !hasLocalHostRoute {
+		t.Fatal("explicit local host route was not retained")
 	}
 }
 
