@@ -312,8 +312,8 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		sourceNamespace = ns
 		opts.NetworkNamespace = ns.Name
 		opts.NetworkNamespaceInterface = ns.HostInterface()
-			opts.NetworkNamespaceProxyIP = ns.ProxyIP
-			opts.NetworkNamespaceHostIP = ns.HostIP
+		opts.NetworkNamespaceProxyIP = ns.ProxyIP
+		opts.NetworkNamespaceHostIP = ns.HostIP
 		defer sourceNamespace.Close()
 		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
 	}
