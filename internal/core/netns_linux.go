@@ -420,12 +420,33 @@ func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string
 	cmd := exec.CommandContext(ctx, "ip", "-4", "route", "show", "table", "all")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, "", "", fmt.Errorf("inspect existing IPv4 routes before allocating the namespace link: %w: %s", err, strings.TrimSpace(string(out)))
+		return nil, "", "", fmt.Errorf("inspect directly connected IPv4 routes before allocating the namespace link: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	used := parseRouteNetworks(string(out))
-	// Try multiple non-public address pools. VPN clients commonly install a
-	// broad 10.0.0.0/8 route, so relying on one hard-coded 10.254.0.0/16 block
-	// makes an otherwise healthy machine appear to have no free subnet.
+
+	// A routed VPN prefix (for example 10.0.0.0/8 via a gateway) does not
+	// occupy an address range on the host link. The veth's connected /30 is
+	// more specific and the return policy rule deliberately routes it through
+	// the main table. Reserve only addresses actually assigned to interfaces
+	// and routes explicitly marked scope link.
+	var interfaceAddresses []string
+	interfaces, interfacesErr := net.Interfaces()
+	if interfacesErr != nil {
+		return nil, "", "", fmt.Errorf("inspect local interface addresses: %w", interfacesErr)
+	}
+	for _, iface := range interfaces {
+		addrs, addrErr := iface.Addrs()
+		if addrErr != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			interfaceAddresses = append(interfaceAddresses, addr.String())
+		}
+	}
+	used := proxySubnetReservations(string(out), interfaceAddresses)
+
+	// Try private, shared, link-local and benchmarking pools. Broad VPN routes
+	// via gateways are intentionally not reservations; directly connected
+	// routes and interface prefixes are.
 	for _, poolCIDR := range []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",
@@ -442,25 +463,31 @@ func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string
 			continue
 		}
 		ones, bits := pool.Mask.Size()
-		if bits != 32 || ones > 16 {
+		if bits != 32 || ones > 30 {
 			continue
 		}
+
+		// Keep chunks no larger than /16 so broad directly-connected ranges
+		// can be skipped efficiently. Smaller pools are scanned as a whole.
+		chunkPrefix := ones
+		if chunkPrefix < 16 {
+			chunkPrefix = 16
+		}
+		chunkCount := uint64(1) << uint(chunkPrefix-ones)
+		candidatesPerChunk := uint64(1) << uint(32-chunkPrefix-2)
 		poolBase := binary.BigEndian.Uint32(pool.IP.To4())
-		subnetCount := 1 << uint(16-ones)
-		// Search independently inside /16 chunks. This lets us skip a whole
-		// chunk covered by a VPN route instead of iterating millions of /30s.
-		for chunkIndex := 0; chunkIndex < subnetCount; chunkIndex++ {
-			chunkBase := poolBase + uint32(chunkIndex<<16)
+		for chunkIndex := uint64(0); chunkIndex < chunkCount; chunkIndex++ {
+			chunkBase := poolBase + uint32(chunkIndex<<(32-chunkPrefix))
 			chunkIP := make(net.IP, net.IPv4len)
 			binary.BigEndian.PutUint32(chunkIP, chunkBase)
-			chunk := &net.IPNet{IP: chunkIP, Mask: net.CIDRMask(16, 32)}
+			chunk := &net.IPNet{IP: chunkIP, Mask: net.CIDRMask(chunkPrefix, 32)}
 			if networkFullyCoveredByRoute(chunk, used) {
 				continue
 			}
-			const candidatesPer16 = 1 << 14
-			start := pid % candidatesPer16
-			for offset := 0; offset < candidatesPer16; offset++ {
-				index := (start + offset) % candidatesPer16
+
+			start := uint64(pid) % candidatesPerChunk
+			for offset := uint64(0); offset < candidatesPerChunk; offset++ {
+				index := (start + offset) % candidatesPerChunk
 				base := make(net.IP, net.IPv4len)
 				binary.BigEndian.PutUint32(base, chunkBase+uint32(index*4))
 				candidate := &net.IPNet{IP: base, Mask: net.CIDRMask(30, 32)}
@@ -475,7 +502,67 @@ func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string
 			}
 		}
 	}
-	return nil, "", "", fmt.Errorf("no unused /30 subnet found in private/link-local/benchmark address pools (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, 198.18/15, 192.0.2/24, 198.51.100/24, 203.0.113/24); existing routes or addresses conflict with every candidate")
+	return nil, "", "", fmt.Errorf("no unused /30 subnet found: all candidate ranges overlap directly connected interface networks or scope-link routes")
+}
+
+// proxySubnetReservations returns only ranges that can genuinely conflict
+// with a local veth: interface address prefixes and routes with scope link.
+// Routes sent through gateways, including broad VPN routes, are not included.
+func proxySubnetReservations(routes string, interfaceAddresses []string) []*net.IPNet {
+	result := parseLinkRouteNetworks(routes)
+	for _, value := range interfaceAddresses {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil || network.IP.To4() == nil {
+			continue
+		}
+		network.IP = network.IP.To4()
+		result = append(result, network)
+	}
+	return result
+}
+
+// parseLinkRouteNetworks extracts only destinations that iproute2 marks as
+// directly connected. Ordinary unicast routes via a gateway are left alone.
+func parseLinkRouteNetworks(routes string) []*net.IPNet {
+	var result []*net.IPNet
+	routeTypes := map[string]bool{
+		"local": true, "broadcast": true, "unicast": true,
+		"multicast": true, "blackhole": true, "unreachable": true,
+		"prohibit": true, "throw": true, "nat": true, "anycast": true,
+	}
+	for _, line := range strings.Split(routes, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		isLinkScope := false
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "scope" && fields[i+1] == "link" {
+				isLinkScope = true
+				break
+			}
+		}
+		if !isLinkScope {
+			continue
+		}
+		destination := fields[0]
+		if routeTypes[destination] {
+			if len(fields) < 2 {
+				continue
+			}
+			destination = fields[1]
+		}
+		if destination == "default" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(destination); err == nil && network.IP.To4() != nil {
+			network.IP = network.IP.To4()
+			result = append(result, network)
+		} else if ip := net.ParseIP(destination); ip != nil && ip.To4() != nil {
+			result = append(result, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
+		}
+	}
+	return result
 }
 
 // networkFullyCoveredByRoute avoids scanning all addresses in a /16 when an
