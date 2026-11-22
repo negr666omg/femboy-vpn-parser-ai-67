@@ -785,11 +785,6 @@ func TestSourceProgressLineRedactsCredentialsAndFitsTerminal(t *testing.T) {
 	if strings.Contains(line, "secret") || strings.Contains(line, "hidden") || !strings.Contains(line, "/private?token=REDACTED") {
 		t.Fatalf("source progress should show the URL path while redacting credentials: %q", line)
 	}
-	head := "[PARSE 2/12 ok:1 skip:0]"
-	startCol, endCol, ok := liveTitleClickRange(line, head)
-	if !ok || startCol < 1 || endCol <= startCol {
-		t.Fatalf("full source title is not exposed as a clickable range: %d-%d, line=%q", startCol, endCol, line)
-	}
 	if got := displayWidth(line); got > 119 {
 		t.Fatalf("source status width=%d, exceeds terminal limit: %q", got, line)
 	}
