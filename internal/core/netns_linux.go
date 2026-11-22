@@ -238,11 +238,7 @@ func selectedInterfaceRoute(ctx context.Context, iface *net.Interface) (net.IP, 
 	if err != nil {
 		return nil, "", "", fmt.Errorf("inspect addresses on %s: %w", iface.Name, err)
 	}
-	type address struct {
-		ip     net.IP
-		prefix string
-	}
-	var addresses []address
+	var addresses []interfaceIPv4Address
 	for _, value := range addrList {
 		ip, network, parseErr := net.ParseCIDR(value.String())
 		if parseErr != nil || ip.To4() == nil || !ip.IsGlobalUnicast() {
@@ -250,7 +246,7 @@ func selectedInterfaceRoute(ctx context.Context, iface *net.Interface) (net.IP, 
 		}
 		ip = ip.To4()
 		prefix := (&net.IPNet{IP: ip.Mask(network.Mask), Mask: network.Mask}).String()
-		addresses = append(addresses, address{ip: ip, prefix: prefix})
+		addresses = append(addresses, interfaceIPv4Address{ip: ip, prefix: prefix})
 	}
 	if len(addresses) == 0 {
 		return nil, "", "", fmt.Errorf("network interface %q has no usable global IPv4 address", iface.Name)
@@ -307,6 +303,11 @@ type ipNexthopJSON struct {
 	Dev     string `json:"dev"`
 }
 
+type interfaceIPv4Address struct {
+	ip     net.IP
+	prefix string
+}
+
 func parseJSONRouteForInterface(raw, iface string, defaultOnly bool) (gateway, source string, err error) {
 	var routes []ipRouteJSON
 	if err := json.Unmarshal([]byte(raw), &routes); err != nil {
@@ -360,10 +361,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func selectInterfaceAddress(addresses []struct {
-	ip     net.IP
-	prefix string
-}, source, iface, gateway string) (net.IP, string, string, error) {
+func selectInterfaceAddress(addresses []interfaceIPv4Address, source, iface, gateway string) (net.IP, string, string, error) {
 	for _, addr := range addresses {
 		if source == "" || addr.ip.Equal(net.ParseIP(source)) {
 			return addr.ip, addr.prefix, gateway, nil
