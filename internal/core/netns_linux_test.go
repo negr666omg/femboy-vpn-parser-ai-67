@@ -147,6 +147,67 @@ func TestParseRouteNetworksUsesOnlyDestinationField(t *testing.T) {
 	}
 }
 
+func TestProxySubnetReservationsIgnoreRoutedVPNPrefixes(t *testing.T) {
+	routes := strings.Join([]string{
+		"default via 192.168.1.75 dev enp1s0",
+		"10.0.0.0/8 via 172.19.0.1 dev throne-tun",
+		"172.16.0.0/12 via 172.19.0.1 dev throne-tun",
+		"192.168.0.0/16 via 172.19.0.1 dev throne-tun",
+		"100.64.0.0/10 via 172.19.0.1 dev throne-tun",
+		"192.168.1.0/24 dev enp1s0 proto kernel scope link src 192.168.1.87",
+	}, "\n")
+	reserved := proxySubnetReservations(routes, []string{
+		"192.168.1.87/24",
+		"192.168.1.118/24",
+		"172.19.0.2/24",
+		"127.0.0.1/8",
+		"::1/128",
+	})
+	free := mustCIDR(t, "10.254.12.0/30")
+	if overlapsAnyRoute(free, reserved) {
+		t.Fatal("routed VPN prefixes must not reserve private veth subnets")
+	}
+	lan := mustCIDR(t, "192.168.1.4/30")
+	if !overlapsAnyRoute(lan, reserved) {
+		t.Fatal("an interface's directly connected LAN must be reserved")
+	}
+	tun := mustCIDR(t, "172.19.0.4/30")
+	if !overlapsAnyRoute(tun, reserved) {
+		t.Fatal("an assigned VPN interface subnet must be reserved")
+	}
+}
+
+func TestParseLinkRouteNetworksExcludesGatewayRoutes(t *testing.T) {
+	routes := strings.Join([]string{
+		"10.0.0.0/8 via 10.1.1.1 dev tun0",
+		"100.64.0.0/10 via 172.19.0.1 dev tun0",
+		"192.168.50.0/24 dev eth1 scope link",
+		"local 192.168.50.10 dev eth1 table local scope host",
+	}, "\n")
+	parsed := parseLinkRouteNetworks(routes)
+	if len(parsed) != 1 {
+		t.Fatalf("parsed %d link routes, want 1: %#v", len(parsed), parsed)
+	}
+	if parsed[0].String() != "192.168.50.0/24" {
+		t.Fatalf("reserved route = %s, want 192.168.50.0/24", parsed[0])
+	}
+}
+
+func TestAllocatorPoolChunkingSupportsSmallDocumentPools(t *testing.T) {
+	_, pool, err := net.ParseCIDR("192.0.2.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ones, bits := pool.Mask.Size()
+	if bits != 32 || ones > 30 {
+		t.Fatalf("documentation /24 pool should be eligible for /30 allocation, got %s", pool)
+	}
+	candidates := uint64(1) << uint(32-ones-2)
+	if candidates != 64 {
+		t.Fatalf("candidate count = %d, want 64", candidates)
+	}
+}
+
 func TestNetworkFullyCoveredByRoute(t *testing.T) {
 	_, whole, err := net.ParseCIDR("10.0.0.0/16")
 	if err != nil {
