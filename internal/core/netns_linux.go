@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -43,8 +44,7 @@ type NetworkNamespace struct {
 	ipForwardOriginal string
 	ipForwardChanged  bool
 	rpFilterPath      string
-	rpFilterOriginal  string
-	rpFilterChanged   bool
+	sysctlOriginal    map[string]string
 }
 
 // HostInterface returns the host-side veth used to reach the proxy inside this
@@ -376,28 +376,50 @@ func (n *NetworkNamespace) enableForwarding(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", forwardPath, err)
 	}
-	rpFilter, err := os.ReadFile(n.rpFilterPath)
-	if err != nil {
+	if _, err := os.ReadFile(n.rpFilterPath); err != nil {
 		return fmt.Errorf("read %s: %w", n.rpFilterPath, err)
 	}
 	n.ipForwardOriginal = strings.TrimSpace(string(forward))
-	n.rpFilterOriginal = strings.TrimSpace(string(rpFilter))
+	n.sysctlOriginal = snapshotIPv4ForwardingSysctls()
 
-	// Enabling forwarding can reset per-interface IPv4 defaults. Read both
-	// original values first, enable forwarding, then apply loose rp_filter.
+	// ip_forward switches Linux between host/router defaults and can reset
+	// IPv4 interface settings. Snapshot those settings before enabling it.
 	if n.ipForwardOriginal != "1" {
 		if err := n.writeRootFile(ctx, forwardPath, "1"); err != nil {
 			return err
 		}
 		n.ipForwardChanged = true
 	}
-	if n.rpFilterOriginal != "2" {
-		if err := n.writeRootFile(ctx, n.rpFilterPath, "2"); err != nil {
-			return fmt.Errorf("set loose reverse-path filtering on the selected interface: %w", err)
-		}
-		n.rpFilterChanged = true
+	if err := n.writeRootFile(ctx, n.rpFilterPath, "2"); err != nil {
+		return fmt.Errorf("set loose reverse-path filtering on the selected interface: %w", err)
 	}
 	return nil
+}
+
+func snapshotIPv4ForwardingSysctls() map[string]string {
+	const root = "/proc/sys/net/ipv4/conf"
+	names := []string{
+		"accept_redirects", "send_redirects", "secure_redirects", "shared_media",
+		"rp_filter", "accept_source_route", "log_martians", "forwarding",
+	}
+	values := make(map[string]string)
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		return values
+	}
+	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
+		for _, name := range names {
+			path := filepath.Join(root, dir.Name(), name)
+			data, readErr := os.ReadFile(path)
+			if readErr == nil {
+				values[path] = strings.TrimSpace(string(data))
+			}
+		}
+	}
+	return values
 }
 
 func (n *NetworkNamespace) installFirewall(ctx context.Context, iface string) error {
@@ -534,13 +556,23 @@ func (n *NetworkNamespace) Close() {
 	if n.resolvDirCreated {
 		_ = n.root(ctx, "rm", "-rf", n.resolvDir)
 	}
-	// Changing ip_forward resets several IPv4 interface defaults on Linux, so
-	// restore it before restoring the interface's original rp_filter value.
+	// Restore ip_forward first: Linux may reset host/router defaults when it
+	// changes. Then put back the saved per-interface IPv4 settings in one root
+	// shell, including rp_filter on the selected interface.
 	if n.ipForwardChanged {
 		_ = n.writeRootFile(ctx, "/proc/sys/net/ipv4/ip_forward", n.ipForwardOriginal)
 	}
-	if n.rpFilterChanged {
-		_ = n.writeRootFile(ctx, n.rpFilterPath, n.rpFilterOriginal)
+	if len(n.sysctlOriginal) > 0 {
+		paths := make([]string, 0, len(n.sysctlOriginal))
+		for path := range n.sysctlOriginal {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		var script strings.Builder
+		for _, path := range paths {
+			fmt.Fprintf(&script, "printf '%%s\\n' %s > %s 2>/dev/null || true\\n", shellQuote(n.sysctlOriginal[path]), shellQuote(path))
+		}
+		_ = n.root(ctx, "sh", "-c", script.String())
 	}
 }
 
