@@ -89,15 +89,39 @@ func CleanupNetworkIsolation(output io.Writer) error {
 			}
 		}
 	}
+	rulesOut, err := runCleanupRoot("ip", "-4", "rule", "show")
+	if err != nil {
+		return fmt.Errorf("list IPv4 policy rules: %w", err)
+	}
+	for _, line := range strings.Split(rulesOut, "\\n") {
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "iif" {
+				if match := subWatchVethPattern.FindStringSubmatch(fields[i+1]); len(match) == 2 {
+					addID(match[1])
+				}
+			}
+		}
+	}
+	if _, lookErr := exec.LookPath("iptables"); lookErr == nil {
+		if filterOut, filterErr := runCleanupRoot("iptables", "-S", "FORWARD"); filterErr == nil {
+			for _, line := range strings.Split(filterOut, "\\n") {
+				fields := strings.Fields(line)
+				for i := 0; i+1 < len(fields); i++ {
+					if fields[i] == "-i" || fields[i] == "-o" {
+						if match := subWatchVethPattern.FindStringSubmatch(fields[i+1]); len(match) == 2 {
+							addID(match[1])
+						}
+					}
+				}
+			}
+		}
+	}
 	if len(ids) == 0 {
 		fmt.Fprintln(output, "[cleanup] no stale SubWatch network resources found")
 		return nil
 	}
 
-	rulesOut, err := runCleanupRoot("ip", "-4", "rule", "show")
-	if err != nil {
-		return fmt.Errorf("list IPv4 policy rules: %w", err)
-	}
 	removed, skipped := 0, 0
 	for id := range ids {
 		namespace := namespaces[id]
