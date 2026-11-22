@@ -473,17 +473,12 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 
 			// Prove that the namespace itself can resolve and reach the configured
 			// URL directly before starting thousands of independent proxy tests.
-			probeTimeout := opts.URLTimeout
-			if probeTimeout > 15*time.Second {
-				probeTimeout = 15 * time.Second
-			}
-			if probeTimeout < 3*time.Second {
-				probeTimeout = 3 * time.Second
-			}
+			probeTargets := networkPreflightTargets(selected, 24)
+			probeTimeout := 12 * time.Second
 			var probeLog bytes.Buffer
 			probeOutput := io.MultiWriter(stdout, &probeLog)
-			fmt.Fprintf(stdout, "[network] direct egress preflight through %s (before proxy tests)\n", opts.Interface)
-			probeErr := ns.Preflight(ctx, opts.URL, probeTimeout, probeOutput)
+			fmt.Fprintf(stdout, "[network] checking reachability of %d proxy endpoints through %s (before proxy tests)\n", len(probeTargets), opts.Interface)
+			probeErr := ns.Preflight(ctx, probeTargets, probeTimeout, probeOutput)
 			if writeErr := os.WriteFile(filepath.Join(opts.OutDir, "network-preflight.log"), probeLog.Bytes(), 0600); writeErr != nil {
 				fmt.Fprintf(stderr, "failed to save network preflight log: %v\n", writeErr)
 			}
@@ -1823,6 +1818,42 @@ func setStageError(n *sub.Node, label, message string) {
 		n.ServiceError = message
 		n.GeminiStatus = "failed"
 	}
+}
+
+// networkPreflightTargets samples proxy endpoints across the selected node
+// set instead of treating one URL-test hostname as a requirement for direct
+// internet access. This checks the actual destinations sing-box must reach.
+func networkPreflightTargets(nodes []sub.Node, limit int) []string {
+	if limit < 1 || len(nodes) == 0 {
+		return nil
+	}
+	count := len(nodes)
+	if count > limit {
+		count = limit
+	}
+	seen := make(map[string]bool, count)
+	out := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		index := i
+		if count > 1 && len(nodes) > count {
+			index = i * (len(nodes) - 1) / (count - 1)
+		}
+		node := nodes[index]
+		host := strings.TrimSpace(fmt.Sprint(node.Outbound["server"]))
+		port := strings.TrimSpace(fmt.Sprint(node.Outbound["server_port"]))
+		if host == "" || port == "" || host == "<nil>" || port == "<nil>" {
+			continue
+		}
+		if _, err := strconv.Atoi(port); err != nil {
+			continue
+		}
+		endpoint := net.JoinHostPort(strings.Trim(host, "[]"), port)
+		if !seen[endpoint] {
+			seen[endpoint] = true
+			out = append(out, endpoint)
+		}
+	}
+	return out
 }
 
 func runURLTest(parent context.Context, n sub.Node, opts Options) (bool, int64, error) {
