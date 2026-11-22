@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,8 @@ type Instance struct {
 	cmd      *exec.Cmd
 	done     chan error
 	tmpDir   string
+	stderr   *cappedLog
+	closeOnce sync.Once
 }
 
 func FindOrDownload(binary string) (string, error) {
@@ -212,7 +215,7 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	listenAddr := "127.0.0.1"
-	namespaceName, proxyInterface := "", ""
+	namespaceName, proxyInterface, proxyIP, proxyHostIP := "", "", "", ""
 	if len(namespace) > 0 {
 		namespaceName = namespace[0]
 		if namespaceName != "" {
@@ -222,9 +225,19 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 	if len(namespace) > 1 {
 		proxyInterface = namespace[1]
 	}
+	if len(namespace) > 2 && namespace[2] != "" {
+		proxyIP = namespace[2]
+		listenAddr = proxyIP
+	}
+	if len(namespace) > 3 {
+		proxyHostIP = namespace[3]
+	}
 	var proxyDialer *net.Dialer
 	if namespaceName != "" {
-		proxyDialer = namespaceProxyDialer(proxyInterface)
+		if proxyHostIP == "" {
+			proxyHostIP = "10.254.0.1"
+		}
+		proxyDialer = namespaceProxyDialer(proxyInterface, proxyHostIP)
 	}
 	out := make(map[string]any, len(outbound)+1)
 	for k, v := range outbound {
@@ -272,7 +285,7 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 		return nil, err
 	}
 	proxyAddress := fmt.Sprintf("%s:%d", listenAddr, port)
-	inst := &Instance{ProxyURL: "http://" + proxyAddress, Dialer: proxyDialer, cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir}
+	inst := &Instance{ProxyURL: "http://" + proxyAddress, Dialer: proxyDialer, cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir, stderr: stderr}
 	go func() { inst.done <- cmd.Wait() }()
 	deadline := time.NewTimer(startupTimeout)
 	defer deadline.Stop()
@@ -327,18 +340,28 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 	}
 }
 
+// Diagnostics returns the captured sing-box stderr output for a failed node test.
+func (i *Instance) Diagnostics() string {
+	if i == nil || i.stderr == nil {
+		return ""
+	}
+	return i.stderr.String()
+}
+
 func (i *Instance) Close() {
 	if i == nil {
 		return
 	}
-	if i.cmd != nil && i.cmd.Process != nil {
-		_ = i.cmd.Process.Kill()
-		select {
-		case <-i.done:
-		case <-time.After(time.Second):
+	i.closeOnce.Do(func() {
+		if i.cmd != nil && i.cmd.Process != nil {
+			_ = i.cmd.Process.Kill()
+			select {
+			case <-i.done:
+			case <-time.After(time.Second):
+			}
 		}
-	}
-	if i.tmpDir != "" {
-		_ = os.RemoveAll(i.tmpDir)
-	}
+		if i.tmpDir != "" {
+			_ = os.RemoveAll(i.tmpDir)
+		}
+	})
 }

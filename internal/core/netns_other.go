@@ -10,7 +10,7 @@ import (
 	"os/exec"
 )
 
-type NetworkNamespace struct { Name string; ProxyIP string }
+type NetworkNamespace struct { Name string; ProxyIP string; HostIP string }
 
 func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*NetworkNamespace, error) {
 	if iface != "" && iface != "auto" {
@@ -25,6 +25,6 @@ func (n *NetworkNamespace) Command(ctx context.Context, binary string, args ...s
 
 func (n *NetworkNamespace) HostInterface() string { return "" }
 
-func namespaceProxyDialer(string) *net.Dialer { return nil }
+func namespaceProxyDialer(string, string) *net.Dialer { return nil }
 
 func (n *NetworkNamespace) Close() {}

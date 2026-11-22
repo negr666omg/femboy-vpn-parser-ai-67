@@ -56,27 +56,6 @@ func TestStabilityTrackerResetsOnFailureSlowPingOrMissingNode(t *testing.T) {
 	}
 }
 
-func TestQualityMarkersAreExclusiveAndGamingTakesPriority(t *testing.T) {
-	const base = "🇩🇪 Germany 29↓42↑"
-	cases := []struct {
-		name string
-		stable bool
-		gaming bool
-		want string
-	}{
-		{name: base, stable: true, want: base + stabilityNameSuffix},
-		{name: base, stable: true, gaming: true, want: base + gamingNameSuffix},
-		{name: base + stabilityNameSuffix, stable: true, gaming: true, want: base + gamingNameSuffix},
-		{name: base + gamingNameSuffix + stabilityNameSuffix, stable: true, want: base + gamingNameSuffix},
-		{name: base + gamingNameSuffix + geminiNameSuffix, stable: true, want: base + gamingNameSuffix + geminiNameSuffix},
-	}
-	for _, tc := range cases {
-		if got := qualityMarkedName(tc.name, tc.stable, tc.gaming); got != tc.want {
-			t.Errorf("qualityMarkedName(%q, %v, %v) = %q, want %q", tc.name, tc.stable, tc.gaming, got, tc.want)
-		}
-	}
-}
-
 func TestStabilityMarkerIsPlacedBeforeGeminiAndRemovedWhenUnstable(t *testing.T) {
 	const base = "🇩🇪 Germany 29↓42↑"
 	cases := []struct {
@@ -91,8 +70,8 @@ func TestStabilityMarkerIsPlacedBeforeGeminiAndRemovedWhenUnstable(t *testing.T)
 		{name: base + " 🧱 🧱", stable: true, want: base + " 🧱"},
 	}
 	for _, tc := range cases {
-		if got := qualityMarkedName(tc.name, tc.stable, false); got != tc.want {
-			t.Errorf("qualityMarkedName(%q, %v, false) = %q, want %q", tc.name, tc.stable, got, tc.want)
+		if got := stabilityMarkedName(tc.name, tc.stable); got != tc.want {
+			t.Errorf("stabilityMarkedName(%q, %v) = %q, want %q", tc.name, tc.stable, got, tc.want)
 		}
 	}
 }

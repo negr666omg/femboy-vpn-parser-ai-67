@@ -204,7 +204,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		opts.Interface = "auto"
 	}
 	if opts.IsolateSourceDownloads && opts.Interface == "auto" {
-		return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
+		return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a specific interface")
 	}
 	if opts.Interface != "auto" {
 		it, err := net.InterfaceByName(opts.Interface)
@@ -300,7 +300,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 	var sourceNamespace *core.NetworkNamespace
 	if opts.IsolateSourceDownloads {
 		if opts.Interface == "auto" {
-			return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
+			return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a specific interface")
 		}
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
 		if nsErr != nil {
@@ -312,6 +312,8 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		sourceNamespace = ns
 		opts.NetworkNamespace = ns.Name
 		opts.NetworkNamespaceInterface = ns.HostInterface()
+		opts.NetworkNamespaceProxyIP = ns.ProxyIP
+		opts.NetworkNamespaceHostIP = ns.HostIP
 		defer sourceNamespace.Close()
 		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
 	}
@@ -466,6 +468,9 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 			defer ns.Close()
 			opts.NetworkNamespace = ns.Name
 			opts.NetworkNamespaceInterface = ns.HostInterface()
+			opts.NetworkNamespaceProxyIP = ns.ProxyIP
+			opts.NetworkNamespaceHostIP = ns.HostIP
+
 		}
 	}
 
@@ -700,7 +705,6 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		}
 	}
 	fmt.Fprintf(stdout, "[stability] %d nodes marked 🧱 (at least %d consecutive URL checks below %d ms)\n", stableCount, stableConsecutiveCycles, stableURLLatencyLimitMS)
-
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
 	perSourceEligible := make([][]sub.Node, len(perSourceNodes))
 	for i := range perSourceNodes {
@@ -2072,7 +2076,7 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 	// Proxy startup has its own readiness deadline in core.Start. The configured
 	// stage timeout applies only to the actual HTTP test, not to local process
 	// startup; otherwise slow startup silently shortens the network timeout.
-	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface)
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface, opts.NetworkNamespaceProxyIP, opts.NetworkNamespaceHostIP)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -2082,13 +2086,22 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 		return err
 	}
 	defer check.CloseClient(client)
-	return fn(parent, client)
+	testErr := fn(parent, client)
+	if testErr != nil {
+		// Stop sing-box before reading its capped stderr buffer so any final
+		// process-level error is included in the node's failure record.
+		inst.Close()
+		if detail := inst.Diagnostics(); detail != "" {
+			return fmt.Errorf("%w (sing-box stderr: %s)", testErr, detail)
+		}
+	}
+	return testErr
 }
 
 // withNodeProxy exposes the local sing-box HTTP CONNECT endpoint so Gemini can
 // use Throne-compatible TLS/HTTP2 without changing the other test stages.
 func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string, *net.Dialer) error) error {
-	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface)
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface, opts.NetworkNamespaceProxyIP, opts.NetworkNamespaceHostIP)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -2111,8 +2124,8 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 // from older versions must not survive a new run.
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
-		"all.txt", "failed.txt", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "speedtested.txt",
-		"url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
+		"all.txt", "failed.txt", "gaming-quality.txt", "gaming-quality.csv", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "speedtested.txt",
+		"url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt", "network-preflight.log",
 		"speed-test-finished.txt", "speed-test-report.csv", "cloudflare-fallback-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
@@ -2195,47 +2208,36 @@ func markGeminiNodes(nodes []sub.Node) error {
 	return nil
 }
 
-const gamingNameSuffix = " 🎮"
-
-// qualityMarkedName keeps quality markers mutually exclusive. A gaming marker
-// always takes precedence over the less-specific stability marker.
-func qualityMarkedName(name string, stable, gaming bool) string {
+// stabilityMarkedName strips markers from earlier versions before applying the current streak.
+func stabilityMarkedName(name string, stable bool) string {
 	name = strings.TrimSpace(name)
 	hasGemini := strings.HasSuffix(name, geminiNameSuffix)
 	if hasGemini {
 		name = strings.TrimSpace(strings.TrimSuffix(name, geminiNameSuffix))
 	}
-	hasGaming := false
-	for {
-		switch {
-		case strings.HasSuffix(name, gamingNameSuffix):
-			hasGaming = true
-			name = strings.TrimSpace(strings.TrimSuffix(name, gamingNameSuffix))
-		case strings.HasSuffix(name, stabilityNameSuffix):
-			name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
-		default:
-			if gaming || hasGaming {
-				name += gamingNameSuffix
-			} else if stable {
-				name += stabilityNameSuffix
-			}
-			if hasGemini {
-				name += geminiNameSuffix
-			}
-			return name
+	for _, suffix := range []string{" 🎮", stabilityNameSuffix} {
+		for strings.HasSuffix(name, suffix) {
+			name = strings.TrimSpace(strings.TrimSuffix(name, suffix))
 		}
 	}
+	if stable {
+		name += stabilityNameSuffix
+	}
+	if hasGemini {
+		name += geminiNameSuffix
+	}
+	return name
 }
 
 func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int) error {
 	for i := range nodes {
 		stable := streaks[nodeIdentity(nodes[i])] >= stableConsecutiveCycles
-		name := qualityMarkedName(nodes[i].Name, stable, false)
+		name := stabilityMarkedName(nodes[i].Name, stable)
 		if name == nodes[i].Name {
 			continue
 		}
 		if err := sub.RenameNode(&nodes[i], name); err != nil {
-			return fmt.Errorf("rename stable node %s: %w", nodes[i].Protocol, err)
+			return fmt.Errorf("rename stability marker for node %s: %w", nodes[i].Protocol, err)
 		}
 	}
 	return nil
