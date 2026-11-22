@@ -194,6 +194,26 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 		return fail(fmt.Errorf("configure namespace default route: %w", err))
 	}
 
+	fmt.Fprintf(output, "[network] installing policy route via %s (gateway %s)\n", it.Name, gateway)
+	if err := run("ip", "-4", "route", "add", interfacePrefix, "dev", it.Name, "scope", "link", "src", interfaceIP.String(), "table", strconv.Itoa(ns.routeTable)); err != nil {
+		return fail(fmt.Errorf("add connected route for %s to isolated routing table: %w", it.Name, err))
+	}
+	ns.routeTableCreated = true
+	_, selectedPrefix, _ := net.ParseCIDR(interfacePrefix)
+	if gateway != "" && (selectedPrefix == nil || !selectedPrefix.Contains(net.ParseIP(gateway))) {
+		if err := run("ip", "-4", "route", "add", gateway+"/32", "dev", it.Name, "scope", "link", "table", strconv.Itoa(ns.routeTable)); err != nil {
+			return fail(fmt.Errorf("add off-link gateway route %s through %s: %w", gateway, it.Name, err))
+		}
+	}
+	defaultRoute := []string{"ip", "-4", "route", "add", "default"}
+	if gateway != "" {
+		defaultRoute = append(defaultRoute, "via", gateway)
+	}
+	defaultRoute = append(defaultRoute, "dev", it.Name, "table", strconv.Itoa(ns.routeTable))
+	if err := run(defaultRoute...); err != nil {
+		return fail(fmt.Errorf("add isolated default route through %s: %w", it.Name, err))
+	}
+
 	// Keep reply packets addressed to the namespace on the main-table veth
 	// route. Select the physical egress table by the namespace's unique source
 	// address: forwarded packets retain ProxyIP until postrouting SNAT. This
