@@ -17,7 +17,7 @@ import (
 	"github.com/negr666omg/subwatch/internal/app"
 )
 
-const version = "0.5.1"
+const version = "0.5.2"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
