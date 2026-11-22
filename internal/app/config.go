@@ -451,7 +451,7 @@ func ExampleConfig() string {
     "directory": "out",
     "split_by_protocol": true,
     "subscription_text": true,
-    "gemini_file": true
+    "gemini_file": false
   },
   "remote_upload": {
     "enabled": false,
