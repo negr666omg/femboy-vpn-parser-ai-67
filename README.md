@@ -86,6 +86,8 @@ The output directory has a deliberately small, predictable set of files:
 - `url-tested-<protocol>.txt` — the same URL-passed nodes split by protocol, for example `url-tested-vless.txt`.
 - `speedtested.txt` — nodes that passed the complete configured speed pipeline. Cloudflare-rescued nodes are included.
 - `speedtested-<protocol>.txt` — speed-passed nodes split by protocol, for example `speedtested-vless.txt`.
+- `gaming-quality.txt` and `gaming-quality-<protocol>.txt` — experimental nodes that passed the configured HTTP latency/jitter gates.
+- `gaming-quality.csv` — all gaming-stage results and measured HTTP latency/jitter values; `packet_loss` is explicitly `not_measured`.
 - `failed.txt` — one human-readable log of rejected config lines, source load and parser errors, URL/speed/service failures, Ookla and Cloudflare fallback results, rename errors and fatal program errors. This is diagnostic output, not a subscription list.
 
 There are no separate failed-node lists, invalid.txt, speed-test CSV reports, Cloudflare-only files or Gemini-only files. The optional experimental gaming stage is the exception: it writes `gaming-quality.csv` for its measurements. Gemini availability is marked in node names with `Gemini 🐱`. Protocol-specific files appear only for protocols that have results in that stage.
