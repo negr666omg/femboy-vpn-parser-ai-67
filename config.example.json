@@ -2,6 +2,9 @@
   "network": {
     "interface": "auto"
   },
+  "loop": {
+    "interval": "0s"
+  },
   "sources": {
     "file": "sources.txt",
     "timeout": "30s"
