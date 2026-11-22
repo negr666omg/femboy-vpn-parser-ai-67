@@ -144,6 +144,10 @@ func TestIsolatedSourceDownloadsRequireExplicitInterface(t *testing.T) {
 	if err := Run(context.Background(), opts, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "network.interface") {
 		t.Fatalf("expected explicit interface validation error at run time, got %v", err)
 	}
+	failureLog, readErr := os.ReadFile(filepath.Join(opts.OutDir, "failed.txt"))
+	if readErr != nil || !strings.Contains(string(failureLog), "network.isolate_source_downloads requires network.interface") {
+		t.Fatalf("fatal run error was not recorded in failed.txt: %q, %v", failureLog, readErr)
+	}
 }
 
 
