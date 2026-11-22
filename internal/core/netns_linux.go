@@ -234,11 +234,11 @@ func namespaceEgressRuleArgs(operation, proxyIP string, routeTable int) []string
 }
 
 func namespaceRouteLookupArgs(proxyIP string) []string {
-	return []string{"-4", "route", "get", "1.1.1.1", "from", proxyIP}
+	return []string{"ip", "-4", "route", "get", "1.1.1.1", "from", proxyIP}
 }
 
 func (n *NetworkNamespace) verifyEgressRoute(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "ip", namespaceRouteLookupArgs(n.ProxyIP)...)
+	cmd := exec.CommandContext(ctx, namespaceRouteLookupArgs(n.ProxyIP)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("verify selected-interface routing: %w: %s\n%s", err, strings.TrimSpace(string(out)), n.routeDiagnostics(ctx))
