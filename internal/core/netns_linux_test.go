@@ -177,19 +177,20 @@ func TestProxySubnetReservationsIgnoreRoutedVPNPrefixes(t *testing.T) {
 	}
 }
 
-func TestParseLinkRouteNetworksExcludesGatewayRoutes(t *testing.T) {
+func TestParseLinkRouteNetworksExcludesGatewayAndBroadLinkRoutes(t *testing.T) {
 	routes := strings.Join([]string{
 		"10.0.0.0/8 via 10.1.1.1 dev tun0",
 		"100.64.0.0/10 via 172.19.0.1 dev tun0",
 		"192.168.50.0/24 dev eth1 scope link",
+		"198.51.100.4/30 dev swh123 scope link",
 		"local 192.168.50.10 dev eth1 table local scope host",
 	}, "\n")
 	parsed := parseLinkRouteNetworks(routes)
 	if len(parsed) != 1 {
 		t.Fatalf("parsed %d link routes, want 1: %#v", len(parsed), parsed)
 	}
-	if parsed[0].String() != "192.168.50.0/24" {
-		t.Fatalf("reserved route = %s, want 192.168.50.0/24", parsed[0])
+	if parsed[0].String() != "198.51.100.4/30" {
+		t.Fatalf("reserved route = %s, want 198.51.100.4/30", parsed[0])
 	}
 }
 
