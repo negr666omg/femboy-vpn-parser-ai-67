@@ -56,28 +56,6 @@ func TestStabilityTrackerResetsOnFailureSlowPingOrMissingNode(t *testing.T) {
 	}
 }
 
-func TestQualityMarkersAreExclusiveAndGamingTakesPriority(t *testing.T) {
-	const base = "🇩🇪 Germany 29↓42↑"
-	cases := []struct {
-		name string
-		stable bool
-		gaming bool
-		want string
-	}{
-		{name: base, stable: true, want: base + stabilityNameSuffix},
-		{name: base, stable: true, gaming: true, want: base + gamingNameSuffix},
-		{name: base + stabilityNameSuffix, stable: true, gaming: true, want: base + gamingNameSuffix},
-		{name: base + gamingNameSuffix + stabilityNameSuffix, stable: true, want: base + stabilityNameSuffix},
-		{name: base + gamingNameSuffix + geminiNameSuffix, stable: true, want: base + stabilityNameSuffix + geminiNameSuffix},
-		{name: base + gamingNameSuffix, want: base},
-	}
-	for _, tc := range cases {
-		if got := qualityMarkedName(tc.name, tc.stable, tc.gaming); got != tc.want {
-			t.Errorf("qualityMarkedName(%q, %v, %v) = %q, want %q", tc.name, tc.stable, tc.gaming, got, tc.want)
-		}
-	}
-}
-
 func TestStabilityMarkerIsPlacedBeforeGeminiAndRemovedWhenUnstable(t *testing.T) {
 	const base = "🇩🇪 Germany 29↓42↑"
 	cases := []struct {
@@ -92,8 +70,8 @@ func TestStabilityMarkerIsPlacedBeforeGeminiAndRemovedWhenUnstable(t *testing.T)
 		{name: base + " 🧱 🧱", stable: true, want: base + " 🧱"},
 	}
 	for _, tc := range cases {
-		if got := qualityMarkedName(tc.name, tc.stable, false); got != tc.want {
-			t.Errorf("qualityMarkedName(%q, %v, false) = %q, want %q", tc.name, tc.stable, got, tc.want)
+		if got := stabilityMarkedName(tc.name, tc.stable); got != tc.want {
+			t.Errorf("stabilityMarkedName(%q, %v) = %q, want %q", tc.name, tc.stable, got, tc.want)
 		}
 	}
 }
@@ -109,7 +87,7 @@ func TestWriteStabilityResultsUpdatesAllSubscriptionLists(t *testing.T) {
 	speedPassed := []sub.Node{node}
 	gemini := []sub.Node{node}
 
-	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{"node-a": 3}, map[string]bool{}); err != nil {
+	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{"node-a": 3}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt"} {
@@ -122,17 +100,7 @@ func TestWriteStabilityResultsUpdatesAllSubscriptionLists(t *testing.T) {
 		}
 	}
 
-	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{"node-a": 3}, map[string]bool{"node-a": true}); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt"} {
-		remark := readSubscriptionRemark(t, filepath.Join(dir, name))
-		if !strings.Contains(remark, "🎮") || strings.Contains(remark, "🧱") {
-			t.Errorf("%s did not give gaming priority over stability: %q", name, remark)
-		}
-	}
-
-	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{}, map[string]bool{}); err != nil {
+	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{}); err != nil {
 		t.Fatal(err)
 	}
 	remark := readSubscriptionRemark(t, filepath.Join(dir, "all.txt"))
