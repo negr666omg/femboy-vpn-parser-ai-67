@@ -317,7 +317,7 @@ func TestNamespaceEgressPolicyUsesSourceAddress(t *testing.T) {
 
 func TestNamespaceRouteLookupUsesSourcePolicyWithoutIIF(t *testing.T) {
 	got := strings.Join(namespaceRouteLookupArgs("10.0.168.194"), " ")
-	want := "-4 route get 1.1.1.1 from 10.0.168.194"
+	want := "ip -4 route get 1.1.1.1 from 10.0.168.194"
 	if got != want {
 		t.Fatalf("route lookup = %q, want %q", got, want)
 	}
