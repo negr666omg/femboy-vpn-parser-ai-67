@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -22,6 +23,23 @@ type runFailureLog struct {
 
 func newRunFailureLog() *runFailureLog {
 	return &runFailureLog{started: time.Now()}
+}
+
+// RecordStartupFailure writes failures that happen before Run can start,
+// such as an invalid config file, to the same consolidated output location.
+func RecordStartupFailure(dir, stage string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	if strings.TrimSpace(dir) == "" {
+		dir = "out"
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create failure-log directory: %w", err)
+	}
+	log := newRunFailureLog()
+	log.Add(stage, cause.Error())
+	return log.Write(filepath.Join(dir, "failed.txt"))
 }
 
 func (l *runFailureLog) Add(stage, message string) {
