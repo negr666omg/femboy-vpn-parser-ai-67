@@ -788,6 +788,7 @@ func (n *NetworkNamespace) nftRules(iface string) string {
 	return fmt.Sprintf("table ip %s {\n"+
 		"  chain forward {\n"+
 		"    type filter hook forward priority -10; policy accept;\n"+
+		"    iifname %s ip saddr %s oifname != %s counter drop\n"+
 		"    iifname %s oifname %s ip saddr %s counter accept\n"+
 		"    iifname %s oifname %s ip daddr %s ct state established,related counter accept\n"+
 		"  }\n"+
@@ -796,7 +797,7 @@ func (n *NetworkNamespace) nftRules(iface string) string {
 		"    oifname %s ip saddr %s counter masquerade\n"+
 		"  }\n"+
 		"}\n",
-		n.firewallTable, hostVeth, physical, n.ProxyIP, physical, hostVeth, n.ProxyIP, physical, n.ProxyIP)
+		n.firewallTable, hostVeth, n.ProxyIP, physical, hostVeth, physical, n.ProxyIP, physical, hostVeth, n.ProxyIP, physical, n.ProxyIP)
 }
 
 func nftQuote(value string) string {
@@ -821,6 +822,15 @@ func (n *NetworkNamespace) installIPTables(ctx context.Context, iface string) er
 		_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", iface, "-o", n.hostVeth, "-d", n.ProxyIP+"/32", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 		_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.hostVeth, "-o", iface, "-s", n.ProxyIP+"/32", "-j", "ACCEPT")
 		return fmt.Errorf("enable namespace source NAT: %w", err)
+	}
+	// Fail closed if a VPN or another policy rule ever selects a different
+	// egress device. The allow rule above still permits the chosen interface.
+	dropOtherEgress := []string{"-w", "10", "-I", "FORWARD", "1", "-i", n.hostVeth, "!", "-o", iface, "-s", n.ProxyIP + "/32", "-j", "DROP"}
+	if err := n.root(ctx, append([]string{"iptables"}, dropOtherEgress...)...); err != nil {
+		_ = n.root(ctx, "iptables", "-w", "10", "-t", "nat", "-D", "POSTROUTING", "-s", n.ProxyIP+"/32", "-o", iface, "-j", "MASQUERADE")
+		_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", iface, "-o", n.hostVeth, "-d", n.ProxyIP+"/32", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.hostVeth, "-o", iface, "-s", n.ProxyIP+"/32", "-j", "ACCEPT")
+		return fmt.Errorf("prevent namespace traffic from leaking through another interface: %w", err)
 	}
 	n.firewallBackend = "iptables"
 	n.firewallCreated = true
@@ -871,6 +881,7 @@ func (n *NetworkNamespace) Close() {
 		case "nft":
 			_ = n.root(ctx, "nft", "delete", "table", "ip", n.firewallTable)
 		case "iptables":
+			_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.hostVeth, "!", "-o", n.physicalInterface, "-s", n.ProxyIP+"/32", "-j", "DROP")
 			_ = n.root(ctx, "iptables", "-w", "10", "-t", "nat", "-D", "POSTROUTING", "-s", n.ProxyIP+"/32", "-o", n.physicalInterface, "-j", "MASQUERADE")
 			_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.physicalInterface, "-o", n.hostVeth, "-d", n.ProxyIP+"/32", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 			_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.hostVeth, "-o", n.physicalInterface, "-s", n.ProxyIP+"/32", "-j", "ACCEPT")
