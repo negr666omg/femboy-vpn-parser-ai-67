@@ -25,6 +25,6 @@ func (n *NetworkNamespace) Command(ctx context.Context, binary string, args ...s
 
 func (n *NetworkNamespace) HostInterface() string { return "" }
 
-func namespaceProxyDialer(string) *net.Dialer { return nil }
+func namespaceProxyDialer(string, string) *net.Dialer { return nil }
 
 func (n *NetworkNamespace) Close() {}
