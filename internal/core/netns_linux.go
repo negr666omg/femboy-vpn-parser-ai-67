@@ -570,7 +570,7 @@ func (n *NetworkNamespace) Close() {
 		sort.Strings(paths)
 		var script strings.Builder
 		for _, path := range paths {
-			fmt.Fprintf(&script, "printf '%%s\\n' %s > %s 2>/dev/null || true\\n", shellQuote(n.sysctlOriginal[path]), shellQuote(path))
+			fmt.Fprintf(&script, "printf '%%s\\n' %s > %s 2>/dev/null || true\n", shellQuote(n.sysctlOriginal[path]), shellQuote(path))
 		}
 		_ = n.root(ctx, "sh", "-c", script.String())
 	}
