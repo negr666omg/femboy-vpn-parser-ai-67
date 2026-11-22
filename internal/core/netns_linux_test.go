@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+func TestRouteLookupDevice(t *testing.T) {
+	cases := []struct {
+		name string
+		output string
+		want string
+	}{
+		{name: "selected ethernet", output: "1.1.1.1 from 10.0.0.2 via 192.168.1.1 dev enp1s0 table 100", want: "enp1s0"},
+		{name: "vpn must be rejected by caller", output: "1.1.1.1 from 10.0.0.2 dev throne-tun table 2022", want: "throne-tun"},
+		{name: "missing route device", output: "RTNETLINK answers: Network is unreachable", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := routeLookupDevice(tc.output); got != tc.want {
+				t.Fatalf("routeLookupDevice() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseDefaultRoute(t *testing.T) {
 	gateway, source, err := parseDefaultRoute("default via 192.168.1.75 proto dhcp src 192.168.1.87 metric 100\n")
 	if err != nil {
