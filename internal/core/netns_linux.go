@@ -247,13 +247,38 @@ func (n *NetworkNamespace) verifyEgressRoute(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "ip", "-4", "route", "get", "1.1.1.1", "from", n.ProxyIP, "iif", n.hostVeth)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("verify selected-interface routing: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("verify selected-interface routing: %w: %s\n%s", err, strings.TrimSpace(string(out)), n.routeDiagnostics(ctx))
 	}
 	selected := routeLookupDevice(string(out))
 	if selected != n.physicalInterface {
-		return fmt.Errorf("refusing to start proxy tests: kernel routes namespace traffic through %q, expected %q; route lookup: %s", selected, n.physicalInterface, strings.TrimSpace(string(out)))
+		return fmt.Errorf("refusing to start proxy tests: kernel routes namespace traffic through %q, expected %q; route lookup: %s\n%s", selected, n.physicalInterface, strings.TrimSpace(string(out)), n.routeDiagnostics(ctx))
 	}
 	return nil
+}
+
+// routeDiagnostics captures the temporary routing state before NewNetworkNamespace
+// rolls it back. It is intentionally read-only and helps distinguish a missing
+// policy rule, an incomplete route table, and an unavailable veth.
+func (n *NetworkNamespace) routeDiagnostics(ctx context.Context) string {
+	checks := [][]string{
+		{"ip", "-4", "rule", "show"},
+		{"ip", "-4", "route", "show", "table", strconv.Itoa(n.routeTable)},
+		{"ip", "-o", "link", "show", "dev", n.hostVeth},
+		{"ip", "-4", "addr", "show", "dev", n.hostVeth},
+		{"ip", "-4", "route", "get", "192.168.1.75", "from", n.ProxyIP, "iif", n.hostVeth},
+		{"ip", "-4", "route", "get", "1.1.1.1", "from", n.ProxyIP},
+	}
+	var result strings.Builder
+	for _, args := range checks {
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		fmt.Fprintf(&result, "$ %s\n%s", strings.Join(args, " "), strings.TrimSpace(string(out)))
+		if err != nil {
+			fmt.Fprintf(&result, "\n(exit: %v)", err)
+		}
+		result.WriteByte('\n')
+	}
+	return strings.TrimSpace(result.String())
 }
 
 func routeLookupDevice(output string) string {
