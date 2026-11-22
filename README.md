@@ -16,6 +16,16 @@ go build -trimpath -ldflags='-s -w' -o sw ./cmd/subwatch
 
 When `network.interface` is set to a specific interface with an IPv4 address and default gateway, SubWatch creates a temporary Linux network namespace connected to the host by a private veth pair. The host forwards that namespace's traffic through a dedicated policy-routing table, then applies temporary source NAT on the selected interface. This uses the host interface's existing address: no second MAC address, extra DHCP lease, or macvlan is involved. The host's main default route is not replaced, so an unrelated host VPN does not capture the namespace's forwarded traffic. SubWatch temporarily enables IPv4 forwarding, applies loose reverse-path filtering on the selected interface, and installs narrowly scoped nftables (preferred) or iptables rules; these settings, routes, rules, namespace and links are restored/removed when the run ends. Install `iproute2`, `sudo`, `util-linux` (`setpriv`), and either `nftables` (`nft`) or `iptables` first.
 
+## Cleaning up stale network resources
+
+SubWatch normally removes its temporary namespace, veth pair, policy-routing rules, route table and private firewall table when a run exits. If an older process was force-killed, run:
+
+```bash
+./sw cleanup
+```
+
+Cleanup only targets resources with SubWatch's private `sw-`, `swh` and `subwatch` names, and skips namespaces that still have processes. It never flushes the system firewall or changes UFW, Throne, unrelated routes, or shared IPv4 sysctls.
+
 ## First run
 
 ```bash
