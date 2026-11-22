@@ -1,6 +1,7 @@
 package app
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,26 +90,33 @@ func TestWriteStabilityResultsUpdatesAllSubscriptionLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt"} {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+		remark := readSubscriptionRemark(t, filepath.Join(dir, name))
+		if !strings.Contains(remark, "🧱") || !strings.Contains(remark, "Gemini") {
+			t.Errorf("%s did not get both markers: %q", name, remark)
 		}
-		if !strings.Contains(string(data), "🧱") || !strings.Contains(string(data), "Gemini") {
-			t.Errorf("%s did not get both markers: %s", name, data)
-		}
-		if strings.Index(string(data), "🧱") > strings.Index(string(data), "Gemini") {
-			t.Errorf("%s placed the stability marker after Gemini: %s", name, data)
+		if strings.Index(remark, "🧱") > strings.Index(remark, "Gemini") {
+			t.Errorf("%s placed the stability marker after Gemini: %q", name, remark)
 		}
 	}
 
 	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{}); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "all.txt"))
+	remark := readSubscriptionRemark(t, filepath.Join(dir, "all.txt"))
+	if strings.Contains(remark, "🧱") {
+		t.Fatalf("stale stability marker remained after streak reset: %q", remark)
+	}
+}
+
+func readSubscriptionRemark(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read %s: %v", path, err)
 	}
-	if strings.Contains(string(data), "🧱") {
-		t.Fatalf("stale stability marker remained after streak reset: %s", data)
+	uri, err := url.Parse(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parse URI in %s: %v", path, err)
 	}
+	return uri.Fragment
 }
