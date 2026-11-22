@@ -477,10 +477,6 @@ func (n *NetworkNamespace) enableForwarding(ctx context.Context) error {
 
 func snapshotIPv4ForwardingSysctls() map[string]string {
 	const root = "/proc/sys/net/ipv4/conf"
-	names := []string{
-		"accept_redirects", "send_redirects", "secure_redirects", "shared_media",
-		"rp_filter", "accept_source_route", "log_martians", "forwarding",
-	}
 	values := make(map[string]string)
 	dirs, err := os.ReadDir(root)
 	if err != nil {
@@ -490,8 +486,16 @@ func snapshotIPv4ForwardingSysctls() map[string]string {
 		if !dir.IsDir() {
 			continue
 		}
-		for _, name := range names {
-			path := filepath.Join(root, dir.Name(), name)
+		confDir := filepath.Join(root, dir.Name())
+		entries, readErr := os.ReadDir(confDir)
+		if readErr != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(confDir, entry.Name())
 			data, readErr := os.ReadFile(path)
 			if readErr == nil {
 				values[path] = strings.TrimSpace(string(data))
