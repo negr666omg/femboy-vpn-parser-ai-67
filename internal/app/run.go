@@ -614,18 +614,18 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 					)
 					return qualityErr
 				})
-				if testErr != nil {
-					n.GamingPassed = false
-					n.GamingError = testErr.Error()
-					live(*n, "Gaming quality: FAILED | "+shortLiveError(n.GamingError))
-					return
-				}
 				n.GamingLatencyMS = quality.LatencyMS
 				n.GamingJitterMS = quality.JitterMS
 				n.GamingDownloadLoadedLatencyMS = quality.DownloadLoadedLatencyMS
 				n.GamingDownloadLoadedJitterMS = quality.DownloadLoadedJitterMS
 				n.GamingUploadLoadedLatencyMS = quality.UploadLoadedLatencyMS
 				n.GamingUploadLoadedJitterMS = quality.UploadLoadedJitterMS
+				if testErr != nil {
+					n.GamingPassed = false
+					n.GamingError = testErr.Error()
+					live(*n, "Gaming quality: FAILED | "+shortLiveError(n.GamingError))
+					return
+				}
 				n.GamingPassed, n.GamingError = gamingQualityDecision(quality, opts.GamingQuality)
 				live(*n, gamingQualityLiveDetail(quality, n.GamingPassed, n.GamingError))
 			},
@@ -646,6 +646,9 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		}
 		speedResults = mergeResults(speedResults, nil, gamingResults, nil)
 		gamingPassed := filterNodes(gamingResults, func(n sub.Node) bool { return n.GamingPassed })
+		if err := applyStabilityMarkers(gamingPassed, nil, gamingPassedByKey); err != nil {
+			return fmt.Errorf("apply gaming markers to gaming-quality list: %w", err)
+		}
 		if err := writeStageFiles(opts.OutDir, "gaming-quality", gamingPassed, true); err != nil {
 			return fmt.Errorf("write gaming-quality results: %w", err)
 		}
@@ -1947,8 +1950,9 @@ func writeGamingQualityReport(dir string, nodes []sub.Node) error {
 		return err
 	}
 	for _, n := range nodes {
+		reportName := qualityMarkedName(n.Name, false, n.GamingPassed)
 		row := []string{
-			n.Name, protocolOf(n),
+			reportName, protocolOf(n),
 			strconv.FormatBool(n.GamingTested),
 			strconv.FormatBool(n.GamingPassed),
 			strconv.FormatFloat(n.GamingLatencyMS, 'f', 2, 64),
