@@ -630,9 +630,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 				live(*n, gamingQualityLiveDetail(quality, n.GamingPassed, n.GamingError))
 			},
 			func(completed sub.Node) error {
-				if completed.GamingPassed {
-					gamingPassedByKey[nodeIdentity(completed)] = true
-				} else if completed.GamingError != "" {
+				if !completed.GamingPassed && completed.GamingError != "" {
 					failures.AddNode("GAMING QUALITY", completed, completed.GamingError)
 				}
 				return nil
@@ -640,6 +638,11 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		)
 		if gamingStageErr != nil {
 			return gamingStageErr
+		}
+		for _, completed := range gamingResults {
+			if completed.GamingPassed {
+				gamingPassedByKey[nodeIdentity(completed)] = true
+			}
 		}
 		speedResults = mergeResults(speedResults, nil, gamingResults, nil)
 		gamingPassed := filterNodes(gamingResults, func(n sub.Node) bool { return n.GamingPassed })
@@ -775,7 +778,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		return fmt.Errorf("write failure log: %w", err)
 	}
 	fmt.Fprintf(stdout, "Failure log: %d entries -> %s\n", failures.Count(), filepath.Join(opts.OutDir, "failed.txt"))
-	fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt, failed.txt")
+	fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt, gaming-quality.txt, gaming-quality.csv, failed.txt")
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
 			failures.Add("UPLOAD", uploadErr.Error())
