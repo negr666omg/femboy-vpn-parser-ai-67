@@ -39,14 +39,8 @@ func Init(dir string) error {
 		"sources.txt": "# One subscription URL, local file path, or single share link per line.\n# https://example.net/subscription\n# ./my-subscription.txt\n",
 		"config.json": ExampleConfig(),
 	} {
-		path := filepath.Join(dir, name)
-		if _, err := os.Stat(path); err == nil {
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
-			return err
+		if err := writeDefaultIfMissing(filepath.Join(dir, name), body); err != nil {
+			return fmt.Errorf("create %s: %w", name, err)
 		}
 	}
 	return nil
@@ -74,11 +68,104 @@ func Interfaces(w io.Writer) error {
 }
 
 type loadedSource struct {
-	Reference  string
-	Body       []byte
-	Line       int
-	LoadError  error
-	ParseError string
+	Reference                 string
+	Body                      []byte
+	Line                      int
+	LoadError                 error
+	ParseError                string
+	TransientConnectionError  bool
+}
+
+type retryableConnectionError struct {
+	stage string
+	err   error
+}
+
+func (e *retryableConnectionError) Error() string {
+	return e.stage + ": " + e.err.Error()
+}
+
+func (e *retryableConnectionError) Unwrap() error { return e.err }
+
+// IsRetryableConnectionError reports whether an error came from an operation
+// that can succeed after connectivity is restored. It deliberately excludes
+// invalid configuration, local file, permission and authentication errors.
+func IsRetryableConnectionError(err error) bool {
+	var target *retryableConnectionError
+	return errors.As(err, &target)
+}
+
+func newRetryableConnectionError(stage string, err error) error {
+	return &retryableConnectionError{stage: stage, err: err}
+}
+
+func isTransientNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary()) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && (dnsErr.IsTimeout || dnsErr.IsTemporary) {
+		return true
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.ECONNREFUSED, syscall.ECONNRESET, syscall.ETIMEDOUT,
+			syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.ENETDOWN, syscall.EPIPE:
+			return true
+		}
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"i/o timeout", "unexpected eof", "server closed idle connection", "timed out", "deadline exceeded",
+		"handshake timeout", "request timeout", "timeout awaiting", "timeout expired",
+		"connection refused", "connection reset", "connection aborted",
+		"connection closed by remote host", "connection lost", "broken pipe",
+		"network is unreachable", "network is down", "no route to host",
+		"host is down", "temporary failure in name resolution",
+		"could not resolve hostname", "no such host", "no dhcpoffers received",
+		"no dhcp offers", "service unavailable", "bad gateway", "gateway timeout",
+		"http 408", "http 425", "http 429", "http 500", "http 502",
+		"http 503", "http 504",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func allSourcesUnavailableRetryError(retryEnabled bool, parsedCount int, sources []loadedSource) error {
+	if !retryEnabled || parsedCount != 0 || !allSourcesFailedWithTransientConnections(sources) {
+		return nil
+	}
+	return newRetryableConnectionError(
+		"all remote subscription sources are temporarily unreachable",
+		fmt.Errorf("no supported proxy nodes found after %d retries per source (source failures: %d; waiting for connectivity)", maxSourceDownloadRetries, len(sources)),
+	)
+}
+
+func allSourcesFailedWithTransientConnections(sources []loadedSource) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	for _, source := range sources {
+		u, err := url.Parse(strings.TrimSpace(source.Reference))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return false
+		}
+		if source.LoadError == nil || !source.TransientConnectionError {
+			return false
+		}
+	}
+	return true
 }
 
 type sourceQualityStats struct {
@@ -96,6 +183,119 @@ type sourceQualityStats struct {
 	SharedGemini int
 }
 
+const stableNameSuffix = " 🧱"
+
+// StabilityState keeps the intersection of passing nodes across completed
+// continuous-mode cycles. It is shared by the CLI's outer loop.
+type StabilityState struct {
+	mu          sync.Mutex
+	started     bool
+	cycles      int
+	stableURL   map[string]struct{}
+	stableSpeed map[string]struct{}
+}
+
+func NewStabilityState() *StabilityState {
+	return &StabilityState{}
+}
+
+func (s *StabilityState) prepareOutput(dir string) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started {
+		return nil
+	}
+	if err := removeStableOutputArtifacts(dir); err != nil {
+		return err
+	}
+	s.started = true
+	return nil
+}
+
+func (s *StabilityState) advance(urlResults, speedResults []sub.Node, maxPingMS int64, minDownload, minUpload float64) ([]sub.Node, []sub.Node, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	urlCandidates := make(map[string]struct{})
+	for _, n := range urlResults {
+		if n.URLPassed && n.URLLatencyMS >= 0 && n.URLLatencyMS < maxPingMS {
+			urlCandidates[nodeDedupKey(n)] = struct{}{}
+		}
+	}
+	speedCandidates := make(map[string]struct{})
+	for _, n := range speedResults {
+		if n.URLPassed && n.URLLatencyMS >= 0 && n.URLLatencyMS < maxPingMS &&
+			n.SpeedPassed && speedThresholdError(n.DownloadMbps, n.UploadMbps, minDownload, minUpload) == "" {
+			speedCandidates[nodeDedupKey(n)] = struct{}{}
+		}
+	}
+
+	if s.cycles == 0 {
+		s.stableURL = urlCandidates
+		s.stableSpeed = speedCandidates
+	} else {
+		s.stableURL = intersectStabilitySet(s.stableURL, urlCandidates)
+		s.stableSpeed = intersectStabilitySet(s.stableSpeed, speedCandidates)
+	}
+	s.cycles++
+	return nodesInStabilitySet(urlResults, s.stableURL), nodesInStabilitySet(speedResults, s.stableSpeed), s.cycles
+}
+
+func intersectStabilitySet(previous, current map[string]struct{}) map[string]struct{} {
+	next := make(map[string]struct{})
+	for key := range current {
+		if _, existed := previous[key]; existed {
+			next[key] = struct{}{}
+		}
+	}
+	return next
+}
+
+func nodesInStabilitySet(nodes []sub.Node, set map[string]struct{}) []sub.Node {
+	out := make([]sub.Node, 0, len(set))
+	seen := make(map[string]struct{}, len(set))
+	for _, n := range nodes {
+		key := nodeDedupKey(n)
+		if _, ok := set[key]; !ok {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+func markStableNodes(nodes, stable []sub.Node) error {
+	stableKeys := nodeKeySet(stable)
+	for i := range nodes {
+		if _, ok := stableKeys[nodeDedupKey(nodes[i])]; !ok {
+			continue
+		}
+		name := strings.TrimSpace(nodes[i].Name)
+		if name == "" {
+			name = protocolOf(nodes[i])
+		}
+		hasGemini := strings.HasSuffix(name, geminiNameSuffix)
+		name = strings.TrimSuffix(name, geminiNameSuffix)
+		if !strings.HasSuffix(name, stableNameSuffix) {
+			name += stableNameSuffix
+		}
+		if hasGemini {
+			name += geminiNameSuffix
+		}
+		if err := sub.RenameNode(&nodes[i], name); err != nil {
+			return fmt.Errorf("mark stable node %s: %w", protocolOf(nodes[i]), err)
+		}
+	}
+	return nil
+}
+
 func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.URLConcurrency < 1 || opts.URLConcurrency > 64 {
 		return fmt.Errorf("url_test.concurrency must be between 1 and 64")
@@ -111,6 +311,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	if opts.MinDownload < 0 || opts.MinUpload < 0 {
 		return fmt.Errorf("minimum speeds cannot be negative")
+	}
+	if opts.StabilityMaxPingMS <= 0 {
+		opts.StabilityMaxPingMS = 100
 	}
 	if opts.Interface == "" {
 		opts.Interface = "auto"
@@ -149,12 +352,15 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.SpeedProvider != "cloudflare" && opts.SpeedProvider != "ookla" {
 		return fmt.Errorf("speed_test.provider must be cloudflare or ookla")
 	}
+	if opts.CloudflareFallback && opts.SpeedProvider != "ookla" {
+		return fmt.Errorf("speed_test.cloudflare_fallback requires speed_test.provider=ookla")
+	}
 	if opts.MaxSpeedDuration <= 0 {
 		opts.MaxSpeedDuration = DefaultOptions().MaxSpeedDuration
 	}
-	if opts.SpeedProvider == "ookla" {
+	if opts.SpeedProvider == "ookla" && !opts.CloudflareFallback {
 		// These settings are specific to the Cloudflare HTTP endpoint and do
-		// not apply to Ookla's automatically selected Speedtest.net server.
+		// not apply to Ookla unless the optional fallback stage is enabled.
 		opts.FirstByteTimeout = 0
 		opts.SpeedSampleInterval = 0
 		opts.DownloadBytes = 0
@@ -197,13 +403,6 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := os.Chmod(opts.OutDir, 0700); err != nil {
 		return err
 	}
-	// Keep the output directory focused on generated result files, including invalid input lines.
-	// Intermediate selections, failed lists, CSV diagnostics and obsolete files
-	// are deliberately not exported.
-	if err := cleanOutputArtifacts(opts.OutDir); err != nil {
-		return fmt.Errorf("clean output directory: %w", err)
-	}
-
 	// When explicitly enabled, create the namespace before loading remote source
 	// URLs. The source list and local files remain host filesystem operations;
 	// only HTTP(S) subscription downloads are executed inside this namespace.
@@ -214,6 +413,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
 		if nsErr != nil {
+			if opts.RetryOnConnectionError && isTransientNetworkError(nsErr) {
+				return newRetryableConnectionError("prepare isolated source network", nsErr)
+			}
 			return fmt.Errorf("prepare isolated source network: %w", nsErr)
 		}
 		if ns == nil {
@@ -234,19 +436,20 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	renderSourceProgress(sourceProgress{Reference: opts.Sources, Phase: "reading source list"})
 
-	var sources []loadedSource
-	var err error
+	var fetch sourceFetcher
 	if sourceNamespace != nil {
 		executable, exeErr := os.Executable()
 		if exeErr != nil {
 			return fmt.Errorf("locate SubWatch executable for isolated source downloads: %w", exeErr)
 		}
-		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, func(fetchCtx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
-			return fetchSourceInNamespace(fetchCtx, sourceNamespace, executable, sourceURL, timeout)
-		}, renderSourceProgress)
+		fetch = sourceFetcherForNamespace(sourceNamespace, executable)
 	} else {
-		sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetchHTTPSource, renderSourceProgress)
+		fetch = sourceFetcherForNamespace(nil, "")
+		fmt.Fprintln(stdout, "[network] remote subscription downloads use the host network (isolate_source_downloads=false)")
 	}
+	var sources []loadedSource
+	var err error
+	sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetch, renderSourceProgress, opts.RetryOnConnectionError)
 	if sourceProgressRendered {
 		fmt.Fprintln(stdout)
 		sourceProgressRendered = false
@@ -328,15 +531,39 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
 	}
-	if err := writeInvalidLines(filepath.Join(opts.OutDir, "invalid.txt"), invalidConfigs); err != nil {
-		return fmt.Errorf("write invalid configs: %w", err)
+	// Keep waiting for connectivity if every remote source exhausted its
+	// per-source retries. The CLI retries this attempt after 5 seconds; outputs
+	// are left untouched until at least one source can be loaded and parsed.
+	if retryErr := allSourcesUnavailableRetryError(opts.RetryOnConnectionError, len(parsed), sources); retryErr != nil {
+		return retryErr
 	}
-	fmt.Fprintf(stdout, "Invalid configs saved: %d -> %s\n", len(invalidConfigs), filepath.Join(opts.OutDir, "invalid.txt"))
-	if len(parsed) == 0 {
-		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
+	// Once the current sources have been parsed, remove stale generated files
+	// immediately before writing this run's results.
+	if opts.StabilityState != nil {
+		if err := opts.StabilityState.prepareOutput(opts.OutDir); err != nil {
+			return fmt.Errorf("prepare stability output: %w", err)
+		}
+	}
+	if err := cleanOutputArtifacts(opts.OutDir, opts.StabilityState != nil); err != nil {
+		return fmt.Errorf("clean output directory: %w", err)
+	}
+	var failedItems []failureRecord
+	for _, diagnostic := range sourceDiagnostics {
+		failedItems = append(failedItems, failureRecord{Stage: "SOURCE", Reason: diagnostic})
+	}
+	for _, line := range invalidConfigs {
+		failedItems = append(failedItems, failureRecord{
+			Stage: "PARSE", URI: line, Reason: "invalid or unsupported proxy configuration",
+		})
+	}
+	if err := writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems); err != nil {
+		return fmt.Errorf("write failure report: %w", err)
 	}
 	if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
 		return err
+	}
+	if len(parsed) == 0 {
+		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
 	}
 	fmt.Fprintf(stdout, "Parsed: %d | invalid: %d | source errors: %d | metadata lines: %d\n", len(parsed), invalid, sourceErrors, len(metadata))
 
@@ -356,15 +583,23 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintln(stdout, "[prepare] Checking sing-box; first run may download the verified core...")
-	corePath, err := core.FindOrDownloadProgress(opts.CorePath, stdout)
+	corePath, err := core.FindOrDownloadProgressContext(ctx, opts.CorePath, stdout)
 	if err != nil {
+		if opts.RetryOnConnectionError && isTransientNetworkError(err) {
+			return newRetryableConnectionError("download sing-box", err)
+		}
 		return fmt.Errorf("sing-box: %w", err)
 	}
 	opts.CorePath = corePath
 	fmt.Fprintf(stdout, "[prepare] sing-box ready: %s\n", corePath)
 	if opts.Interface != "auto" && opts.NetworkNamespace == "" {
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
-		if nsErr != nil { return fmt.Errorf("prepare isolated network: %w", nsErr) }
+		if nsErr != nil {
+			if opts.RetryOnConnectionError && isTransientNetworkError(nsErr) {
+				return newRetryableConnectionError("prepare isolated network", nsErr)
+			}
+			return fmt.Errorf("prepare isolated network: %w", nsErr)
+		}
 		if ns != nil {
 			defer ns.Close()
 			opts.NetworkNamespace = ns.Name
@@ -373,11 +608,14 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
-	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
+	pipelineStageTotal, serviceStageNumber := 4, 4
+	if cloudflareFallbackEnabled(opts) {
+		pipelineStageTotal, serviceStageNumber = 5, 5
+	}
+	fmt.Fprintf(stdout, "\n[2/%d] URL TEST: %d nodes, target %s, timeout %s\n", pipelineStageTotal, len(selected), opts.URL, opts.URLTimeout)
 	var urlPassedLive []sub.Node
-	var urlFailedLive []sub.Node
 	var urlFilesMu sync.Mutex
-	urlResults, stageErr := runStageWithLiveCallback(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	urlResults, stageErr := runStageWithLiveCallbackMode(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, "checking URL…")
 		passed, latency, testErr := runURLTest(stageCtx, *n, opts)
 		n.URLPassed, n.URLLatencyMS = passed, latency
@@ -399,25 +637,23 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		defer urlFilesMu.Unlock()
 		if completed.URLPassed {
 			urlPassedLive = append(urlPassedLive, completed)
-			return writeStageFiles(opts.OutDir, "url-test-finished", urlPassedLive, true)
+			if err := writeStageFiles(opts.OutDir, "url-tested", urlPassedLive, true); err != nil {
+				return err
+			}
+		} else {
+			failure := failureRecordFromNode("URL TEST", completed, completed.URLError)
+			failure.LatencyMS = completed.URLLatencyMS
+			failedItems = append(failedItems, failure)
 		}
-		urlFailedLive = append(urlFailedLive, completed)
-		if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailedLive, true); err != nil {
-			return err
+		if completed.RenameError != "" {
+			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
-		return writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailedLive)
-	})
+		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
+	}, opts.LiveDisplayMode)
 	if stageErr != nil {
 		return stageErr
 	}
 	urlPassed := filterNodes(urlResults, func(n sub.Node) bool { return n.URLPassed })
-	urlFailed := filterNodes(urlResults, func(n sub.Node) bool { return !n.URLPassed })
-	if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailed, true); err != nil {
-		return err
-	}
-	if err := writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailed); err != nil {
-		return err
-	}
 	// Keep every selected node's remark synchronized in all.txt too. Nodes
 	// that fail URL reachability cannot have a meaningful country/speed result,
 	// so they receive the explicit 🌐 Unknown fallback rather than the source name.
@@ -427,15 +663,15 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
-	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "URL test complete: %d passed / %d failed. Per-protocol URL lists were updated during testing.\n", len(urlPassed), len(urlResults)-len(urlPassed))
 
 	// Stage 2 begins only after every URL test has completed (global barrier).
 	// urlPassed remains the authoritative in-memory result set.
-	fmt.Fprintf(stdout, "\n[3/4] SPEED TEST (%s): %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", strings.ToUpper(opts.SpeedProvider), len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
-	speedResults, _ := runStageWithLiveCallback(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	fmt.Fprintf(stdout, "\n[3/%d] SPEED TEST (%s): %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", pipelineStageTotal, strings.ToUpper(opts.SpeedProvider), len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
+	speedResults, stageErr := runStageWithLiveCallbackMode(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "starting "+strings.ToUpper(opts.SpeedProvider)+" speed test…"))
 		down, up, testErr := runSpeedTestWithProgress(stageCtx, *n, opts, func(progress check.SpeedProgress) {
 			live(*n, speedProgressDetail(*n, progress))
@@ -471,7 +707,88 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			speedState += " | rename: " + shortLiveError(n.RenameError)
 		}
 		live(*n, speedLiveDetail(*n, speedState))
-	}, nil)
+	}, func(completed sub.Node) error {
+		if !completed.SpeedPassed && !cloudflareFallbackEnabled(opts) {
+			reason := completed.SpeedError
+			if reason == "" {
+				reason = "speed test did not pass"
+			}
+			failedItems = append(failedItems, failureRecordFromNode("SPEED TEST", completed, reason))
+		}
+		if completed.RenameError != "" && (!cloudflareFallbackEnabled(opts) || completed.SpeedPassed) {
+			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
+		}
+		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
+	}, opts.LiveDisplayMode)
+	if stageErr != nil {
+		return stageErr
+	}
+
+	if cloudflareFallbackEnabled(opts) {
+		fallbackCandidates := cloudflareFallbackCandidates(speedResults)
+		fmt.Fprintf(stdout, "\n[4/%d] CLOUDFLARE FALLBACK: %d URL-passed nodes failed Ookla; testing only those nodes\n", pipelineStageTotal, len(fallbackCandidates))
+		fallbackResults, fallbackErr := runStageWithLiveCallbackMode(ctx, "CLOUDFLARE FALLBACK", fallbackCandidates, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+			primaryReason := strings.TrimSpace(n.SpeedError)
+			if primaryReason == "" {
+				primaryReason = speedThresholdError(n.DownloadMbps, n.UploadMbps, opts.MinDownload, opts.MinUpload)
+			}
+			if primaryReason == "" {
+				primaryReason = "Ookla speed test did not pass"
+			}
+
+			live(*n, speedLiveDetail(*n, "starting Cloudflare fallback…"))
+			down, up, testErr := runSpeedTestWithProvider(stageCtx, *n, opts, "cloudflare", func(progress check.SpeedProgress) {
+				live(*n, speedProgressDetail(*n, progress))
+			})
+			n.DownloadMbps, n.UploadMbps = down, up
+			fallbackReason := ""
+			if testErr != nil {
+				fallbackReason = testErr.Error()
+			} else {
+				fallbackReason = speedThresholdError(down, up, opts.MinDownload, opts.MinUpload)
+			}
+
+			if opts.RenameNodes {
+				n.RenameError = renameNodeAfterSpeed(stageCtx, n, opts, down, up)
+			}
+			if fallbackReason != "" {
+				n.SpeedPassed = false
+				n.SpeedError = fmt.Sprintf("Ookla: %s; Cloudflare fallback: %s", primaryReason, fallbackReason)
+				detail := speedLiveDetail(*n, "FAILED: "+shortLiveError(fallbackReason))
+				if n.RenameError != "" {
+					detail += " | rename: " + shortLiveError(n.RenameError)
+				}
+				live(*n, detail)
+				return
+			}
+
+			n.SpeedPassed = true
+			n.SpeedError = ""
+			detail := "Cloudflare PASS (recovered after Ookla failure)"
+			if n.RenameError != "" {
+				detail += " | rename: " + shortLiveError(n.RenameError)
+			}
+			live(*n, speedLiveDetail(*n, detail))
+		}, func(completed sub.Node) error {
+			if !completed.SpeedPassed {
+				reason := completed.SpeedError
+				if reason == "" {
+					reason = "Ookla and Cloudflare fallback did not pass"
+				}
+				failedItems = append(failedItems, failureRecordFromNode("SPEED TEST", completed, reason))
+			}
+			if completed.RenameError != "" {
+				failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
+			}
+			return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
+		}, opts.LiveDisplayMode)
+		if fallbackErr != nil {
+			return fallbackErr
+		}
+		replaceNodesByIdentity(speedResults, fallbackCandidates, fallbackResults)
+		recovered := len(filterNodes(fallbackResults, func(n sub.Node) bool { return n.SpeedPassed }))
+		fmt.Fprintf(stdout, "Cloudflare fallback complete: %d recovered / %d tested | %d still failed\n", recovered, len(fallbackResults), len(fallbackResults)-recovered)
+	}
 
 	// Speed testing changes display names after the URL-stage file was first
 	// written. Propagate the final URI remarks by identity and refresh both
@@ -481,21 +798,21 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
 		return err
 	}
-	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
 		return err
 	}
 
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
-	if err := writeStageFiles(opts.OutDir, "speed-test-finished", speedPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "speedtested", speedPassed, true); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "Speed test complete: %d passed / %d failed.\n", len(speedPassed), len(speedFailed))
 
 	// Stage 3 starts only after every speed test has completed. No service check
 	// is run on a node that failed either speed threshold.
-	fmt.Fprintf(stdout, "\n[4/4] SERVICE CHECK: %d speed-passed nodes, Gemini must be fully available\n", len(speedPassed))
-	serviceResults, _ := runStageWithLiveCallback(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+	fmt.Fprintf(stdout, "\n[%d/%d] SERVICE CHECK: %d speed-passed nodes, Gemini must be fully available\n", serviceStageNumber, pipelineStageTotal, len(speedPassed))
+	serviceResults, stageErr := runStageWithLiveCallbackMode(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "Gemini: checking…"))
 		status, note, region, ipInfo, testErr := runServiceCheck(stageCtx, *n, opts)
 		n.GeminiStatus, n.GeminiNote, n.GeminiRegion = status, note, region
@@ -514,13 +831,90 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			detail += " | " + n.GeminiNote
 		}
 		live(*n, detail)
-	}, nil)
+	}, func(completed sub.Node) error {
+		if !geminiAvailable(completed) {
+			reason := completed.ServiceError
+			if reason == "" {
+				reason = "Gemini status: " + completed.GeminiStatus
+				if completed.GeminiNote != "" {
+					reason += " (" + completed.GeminiNote + ")"
+				}
+			}
+			failedItems = append(failedItems, failureRecordFromNode("SERVICE CHECK", completed, reason))
+		}
+		if completed.RenameError != "" {
+			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
+		}
+		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
+	}, opts.LiveDisplayMode)
+	if stageErr != nil {
+		return stageErr
+	}
 	finalCandidates := filterNodes(serviceResults, func(n sub.Node) bool { return geminiAvailable(n) })
 	// Each node is tested exactly once per enabled stage: URL, speed, then Gemini.
 	// There is deliberately no final recheck stage; it duplicated URL and Gemini requests.
 	finalNodes := finalCandidates
+	var stableURLNodes, stableSpeedNodes []sub.Node
+	if opts.StabilityState != nil {
+		stableURLNodes, stableSpeedNodes, stabilityCycle := opts.StabilityState.advance(
+			urlResults, speedResults, opts.StabilityMaxPingMS, opts.MinDownload, opts.MinUpload,
+		)
+		applyNodeUpdatesByIdentity(stableURLNodes, speedResults)
+		for _, item := range []struct {
+			nodes  []sub.Node
+			stable []sub.Node
+		}{
+			{nodes: parsed, stable: stableURLNodes},
+			{nodes: urlPassed, stable: stableURLNodes},
+			{nodes: speedPassed, stable: stableSpeedNodes},
+			{nodes: finalNodes, stable: stableSpeedNodes},
+		} {
+			if err := markStableNodes(item.nodes, item.stable); err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(stdout, "[STABILITY] completed cycles: %d | URL-stable (<%d ms): %d | speed-stable (<%d ms and both speed minimums): %d\n",
+			stabilityCycle, opts.StabilityMaxPingMS, len(stableURLNodes), opts.StabilityMaxPingMS, len(stableSpeedNodes))
+	}
 	if err := writeGeminiResults(opts.OutDir, finalNodes, parsed, urlPassed, speedPassed, opts.GeminiFile); err != nil {
 		return err
+	}
+	if opts.StabilityState != nil {
+		// Keep Gemini's suffix in the stable snapshots too: "... 🧱 Gemini 🐱".
+		applyNodeUpdatesByIdentity(stableURLNodes, finalNodes)
+		applyNodeUpdatesByIdentity(stableSpeedNodes, finalNodes)
+		// Gemini propagation copies the final URI remark. Re-apply the
+		// stage-specific stability marker afterwards so URL-stable nodes keep
+		// 🧱 even when they have not qualified for the speed-stable set.
+		for _, item := range []struct {
+			nodes  []sub.Node
+			stable []sub.Node
+		}{
+			{nodes: parsed, stable: stableURLNodes},
+			{nodes: urlPassed, stable: stableURLNodes},
+			{nodes: speedPassed, stable: stableSpeedNodes},
+			{nodes: stableURLNodes, stable: stableURLNodes},
+			{nodes: stableSpeedNodes, stable: stableSpeedNodes},
+		} {
+			if err := markStableNodes(item.nodes, item.stable); err != nil {
+				return err
+			}
+		}
+		if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "speedtested", speedPassed, true); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "stable-url-tested", stableURLNodes, true); err != nil {
+			return err
+		}
+		if err := writeStageFiles(opts.OutDir, "stable-speedtested", stableSpeedNodes, true); err != nil {
+			return err
+		}
 	}
 
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
@@ -531,9 +925,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	printSubscriptionQualitySummary(stdout, sources, perSourceEligible, urlPassed, speedPassed, finalNodes)
 	fmt.Fprintf(stdout, "Output directory: %s\n", opts.OutDir)
 	if opts.GeminiFile {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speed-test-finished*.txt, gemini.txt and gemini-*.txt (all files contain URI lines)")
+		fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt, failed.txt and Gemini files")
 	} else {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt and speed-test-finished*.txt; Gemini-available nodes are marked with 'Gemini 🐱' in every applicable file")
+		fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt and failed.txt; Gemini-available nodes are marked with 'Gemini 🐱'")
 	}
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
@@ -547,7 +941,21 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	return ctx.Err()
 }
 
-const sourceDownloadTimeout = 30 * time.Second
+const (
+	sourceDownloadTimeout = 30 * time.Second
+	connectionRetryDelay  = 5 * time.Second
+)
+
+func waitForConnectionRetry(ctx context.Context) error {
+	timer := time.NewTimer(connectionRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 func loadSources(ctx context.Context, path string) ([]loadedSource, error) {
 	return loadSourcesWithTimeout(ctx, path, sourceDownloadTimeout)
@@ -575,9 +983,20 @@ func loadSourcesWithFetcher(ctx context.Context, path string, timeout time.Durat
 	return loadSourcesWithFetcherProgress(ctx, path, timeout, fetch, nil)
 }
 
-func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress)) ([]loadedSource, error) {
+const maxSourceDownloadRetries = 3
+
+func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress), retryTransientConnection ...bool) ([]loadedSource, error) {
+	return loadSourcesWithFetcherProgressAndWait(ctx, path, timeout, fetch, progress, waitForConnectionRetry, retryTransientConnection...)
+}
+
+// The retry wait is injectable so bounded retry behavior can be tested without
+// sleeping between attempts.
+func loadSourcesWithFetcherProgressAndWait(ctx context.Context, path string, timeout time.Duration, fetch sourceFetcher, progress func(sourceProgress), retryWait func(context.Context) error, retryTransientConnection ...bool) ([]loadedSource, error) {
 	if fetch == nil {
 		fetch = fetchHTTPSource
+	}
+	if retryWait == nil {
+		retryWait = waitForConnectionRetry
 	}
 	report := func(p sourceProgress) {
 		if progress != nil {
@@ -630,14 +1049,44 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 			if parseErr != nil || u.Host == "" {
 				source.LoadError = fmt.Errorf("invalid subscription URL")
 			} else {
-				body, fetchErr := fetch(ctx, entry, timeout)
-				if fetchErr != nil {
+				retry := len(retryTransientConnection) > 0 && retryTransientConnection[0]
+				retries := 0
+				retryExhausted := false
+				for {
+					body, fetchErr := fetch(ctx, entry, timeout)
+					if fetchErr == nil {
+						source.Body = body
+						break
+					}
 					if ctx.Err() != nil {
 						return sources, ctx.Err()
 					}
+					if retry && isTransientNetworkError(fetchErr) {
+						if retries >= maxSourceDownloadRetries {
+							source.LoadError = fmt.Errorf("download failed after %d retries: %w", maxSourceDownloadRetries, fetchErr)
+							source.TransientConnectionError = true
+							retryExhausted = true
+							break
+						}
+						retries++
+						report(sourceProgress{
+							Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount,
+							Reference: entry, Phase: fmt.Sprintf("connection unavailable; retry %d/%d in 5s", retries, maxSourceDownloadRetries),
+						})
+						if waitErr := retryWait(ctx); waitErr != nil {
+							return sources, waitErr
+						}
+						continue
+					}
 					source.LoadError = fmt.Errorf("download failed: %w", fetchErr)
-				} else {
-					source.Body = body
+					source.TransientConnectionError = isTransientNetworkError(fetchErr)
+					break
+				}
+				if retryExhausted {
+					report(sourceProgress{
+						Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount + 1,
+						Reference: entry, Phase: fmt.Sprintf("failed after %d retries; skipped", maxSourceDownloadRetries),
+					})
 				}
 			}
 		} else if phase == "loading inline link" {
@@ -652,7 +1101,9 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 		}
 		if source.LoadError != nil {
 			skippedCount++
-			report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: "failed"})
+			if !source.TransientConnectionError || !strings.Contains(source.LoadError.Error(), "after 3 retries") {
+				report(sourceProgress{Index: index + 1, Total: len(entries), Loaded: loadedCount, Skipped: skippedCount, Reference: entry, Phase: "failed"})
+			}
 		} else {
 			loadedCount++
 			finishedPhase := "loaded"
@@ -669,6 +1120,17 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 
 func fetchHTTPSource(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
 	return fetchHTTPSourceWithProxy(ctx, sourceURL, timeout, true)
+}
+
+// sourceFetcherForNamespace keeps source downloads on the normal host network
+// unless an isolated source namespace was explicitly created.
+func sourceFetcherForNamespace(namespace *core.NetworkNamespace, executable string) sourceFetcher {
+	if namespace == nil {
+		return fetchHTTPSource
+	}
+	return func(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+		return fetchSourceInNamespace(ctx, namespace, executable, sourceURL, timeout)
+	}
 }
 
 // fetchHTTPSourceDirect deliberately ignores HTTP_PROXY/HTTPS_PROXY inherited
@@ -761,6 +1223,45 @@ func FetchSourceCommand(timeout time.Duration) error {
 	return err
 }
 
+func sourceURLForDisplay(reference string) string {
+	parsed, err := url.Parse(strings.TrimSpace(reference))
+	if err != nil || parsed.Host == "" {
+		return cleanLiveText(reference)
+	}
+	// Never expose URL userinfo or obvious access-token query parameters in
+	// the live terminal line.
+	parsed.User = nil
+	if parsed.RawQuery != "" {
+		parts := strings.Split(parsed.RawQuery, "&")
+		for i, part := range parts {
+			key := strings.SplitN(part, "=", 2)[0]
+			decodedKey, decodeErr := url.QueryUnescape(key)
+			if decodeErr == nil && sensitiveSourceQueryKey(decodedKey) {
+				parts[i] = key + "=REDACTED"
+			}
+		}
+		parsed.RawQuery = strings.Join(parts, "&")
+	}
+	return cleanLiveText(parsed.String())
+}
+
+func sensitiveSourceQueryKey(key string) bool {
+	key = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(key), "-", "_"))
+	switch key {
+	case "token", "access_token", "refresh_token", "auth", "authorization",
+		"password", "passwd", "pass", "secret", "api_key", "apikey", "key",
+		"signature", "sig", "client_secret", "private_key", "credential",
+		"credentials", "jwt", "session", "session_id":
+		return true
+	}
+	for _, marker := range []string{"token", "secret", "password", "signature", "credential"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func sourceProgressTitle(reference string) string {
 	reference = strings.TrimSpace(reference)
 	if parsed, err := url.Parse(reference); err == nil && parsed.Scheme != "" {
@@ -768,7 +1269,7 @@ func sourceProgressTitle(reference string) string {
 		switch scheme {
 		case "http", "https":
 			if parsed.Host != "" {
-				return parsed.Host
+				return sourceURLForDisplay(reference)
 			}
 		case "vless", "trojan", "ss", "shadowsocks", "hysteria2", "hy2", "tuic", "socks", "socks5":
 			if parsed.Host != "" {
@@ -784,6 +1285,73 @@ func sourceProgressTitle(reference string) string {
 		return "subscription source"
 	}
 	return base
+}
+
+func truncateDisplayMiddle(value string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if displayWidth(value) <= maxWidth {
+		return value
+	}
+	if maxWidth == 1 {
+		return "…"
+	}
+
+	// Keep more of the beginning so a long source URL still exposes its host,
+	// while retaining its suffix and the separate progress/status field.
+	available := maxWidth - 1
+	prefixBudget := available * 5 / 6
+	suffixBudget := available - prefixBudget
+	runes := []rune(value)
+
+	var prefix strings.Builder
+	used := 0
+	for i := 0; i < len(runes); i++ {
+		width := runeCellWidth(runes[i])
+		if isRegionalIndicator(runes[i]) && i+1 < len(runes) && isRegionalIndicator(runes[i+1]) {
+			width = 2
+			if used+width > prefixBudget {
+				break
+			}
+			prefix.WriteRune(runes[i])
+			prefix.WriteRune(runes[i+1])
+			used += width
+			i++
+			continue
+		}
+		if used+width > prefixBudget {
+			break
+		}
+		prefix.WriteRune(runes[i])
+		used += width
+	}
+
+	var suffixRunes []rune
+	used = 0
+	for i := len(runes) - 1; i >= 0; i-- {
+		width := runeCellWidth(runes[i])
+		if isRegionalIndicator(runes[i]) && i > 0 && isRegionalIndicator(runes[i-1]) {
+			width = 2
+			if used+width > suffixBudget {
+				break
+			}
+			suffixRunes = append(suffixRunes, runes[i-1], runes[i])
+			used += width
+			i--
+			continue
+		}
+		if used+width > suffixBudget {
+			break
+		}
+		suffixRunes = append(suffixRunes, runes[i])
+		used += width
+	}
+	var suffix strings.Builder
+	for i := len(suffixRunes) - 1; i >= 0; i-- {
+		suffix.WriteRune(suffixRunes[i])
+	}
+	return prefix.String() + "…" + suffix.String()
 }
 
 func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string {
@@ -806,7 +1374,11 @@ func formatSourceProgressLine(progress sourceProgress, terminalWidth int) string
 		if limit < 1 {
 			limit = 1
 		}
-		return truncateDisplay(line, limit)
+		identityBudget := limit - displayWidth(head) - displayWidth(detail) - 6
+		if identityBudget < 1 {
+			return truncateDisplay(line, limit)
+		}
+		return head + " | " + truncateDisplayMiddle(identity, identityBudget) + " | " + detail
 	}
 	return line
 }
@@ -1073,10 +1645,15 @@ func runStageWithCallback(ctx context.Context, label string, nodes []sub.Node, c
 	}, onComplete)
 }
 
-// runStageWithLiveCallback maintains exactly one mutable terminal status line.
+// runStageWithLiveCallback maintains independently updated worker status rows.
 // Concurrent workers may test multiple nodes, but only the most recently
 // started node owns the visible line; older workers cannot overwrite it later.
 func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error) ([]sub.Node, error) {
+	return runStageWithLiveCallbackMode(ctx, label, nodes, concurrency, stdout, passed, test, onComplete, "immediate")
+}
+
+func runStageWithLiveCallbackMode(ctx context.Context, label string, nodes []sub.Node, concurrency int, stdout io.Writer, passed func(*sub.Node) bool, test func(context.Context, *sub.Node, func(sub.Node, string)), onComplete func(sub.Node) error, displayMode string) ([]sub.Node, error) {
+	deferredDisplay := displayMode == "after_result"
 	results := make([]sub.Node, len(nodes))
 	if len(nodes) == 0 {
 		fmt.Fprintf(stdout, "[%s] 0/0 (nothing to test)\n", label)
@@ -1151,15 +1728,20 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 				results[i] = nodes[i]
 
 				progressMu.Lock()
-				statuses[workerID] = workerStatus{node: results[i], detail: "starting…", active: true}
+				statuses[workerID].active = true
+				if !deferredDisplay {
+					statuses[workerID] = workerStatus{node: results[i], detail: "starting…", active: true}
+				}
 				render()
 				progressMu.Unlock()
 
 				emit := func(node sub.Node, detail string) {
 					progressMu.Lock()
-					statuses[workerID].node = node
-					statuses[workerID].detail = cleanLiveText(detail)
-					render()
+					if !deferredDisplay {
+						statuses[workerID].node = node
+						statuses[workerID].detail = cleanLiveText(detail)
+						render()
+					}
 					progressMu.Unlock()
 				}
 
@@ -1170,6 +1752,14 @@ func runStageWithLiveCallback(ctx context.Context, label string, nodes []sub.Nod
 				}
 
 				progressMu.Lock()
+				// In after_result mode, publish the new server only after its
+				// test has returned a definitive pass/fail result. Until then
+				// this worker row keeps the previous server's complete line.
+				if deferredDisplay {
+					statuses[workerID].node = results[i]
+					statuses[workerID].detail = stageResultDetail(label, results[i])
+					render()
+				}
 				if onComplete != nil && callbackErr == nil {
 					if err := onComplete(results[i]); err != nil {
 						callbackErr = err
@@ -1275,10 +1865,9 @@ func speedProgressDetail(n sub.Node, progress check.SpeedProgress) string {
 	return fmt.Sprintf("download: %.0f Mbps | upload: %.0f Mbps | %s", downloadMbps, uploadMbps, state)
 }
 
-// formatLiveStatusLine keeps ping as a fixed right-hand field. The progress
-// counters remain first; the config name and stage details share the remaining
-// width and are shortened as needed. One terminal column is reserved to avoid
-// accidental auto-wrap at the right margin.
+// formatLiveStatusLine keeps the current server's own ping at the far right.
+// The config name and result detail share the remaining width. One terminal
+// column is reserved to avoid accidental auto-wrap at the right margin.
 func formatLiveStatusLine(label string, done, total, passed int, node sub.Node, detail string, terminalWidth int) string {
 	head := fmt.Sprintf("[%s] %d/%d | passed: %d | failed: %d", label, done, total, passed, done-passed)
 	return formatLiveStatusParts(head, liveNodeTitle(node), detail, livePingText(node), terminalWidth)
@@ -1481,7 +2070,7 @@ func stageResultDetail(label string, n sub.Node) string {
 	switch label {
 	case "URL TEST":
 		return urlLiveDetail(n)
-	case "SPEED TEST":
+	case "SPEED TEST", "CLOUDFLARE FALLBACK":
 		state := "FAIL"
 		if n.SpeedPassed {
 			state = "PASS"
@@ -1504,7 +2093,7 @@ func setStageError(n *sub.Node, label, message string) {
 	switch label {
 	case "URL TEST":
 		n.URLError = message
-	case "SPEED TEST":
+	case "SPEED TEST", "CLOUDFLARE FALLBACK":
 		n.SpeedError = message
 	case "SERVICE CHECK":
 		n.ServiceError = message
@@ -1536,17 +2125,44 @@ func speedThresholdError(download, upload, minDownload, minUpload float64) strin
 	return strings.Join(reasons, "; ")
 }
 
+func cloudflareFallbackEnabled(opts Options) bool {
+	return opts.SpeedProvider == "ookla" && opts.CloudflareFallback
+}
+
+func cloudflareFallbackCandidates(nodes []sub.Node) []sub.Node {
+	return filterNodes(nodes, func(n sub.Node) bool { return n.URLPassed && !n.SpeedPassed })
+}
+
+func replaceNodesByIdentity(nodes, originals, updates []sub.Node) {
+	if len(originals) != len(updates) {
+		return
+	}
+	for i, original := range originals {
+		key := nodeDedupKey(original)
+		for j := range nodes {
+			if nodeDedupKey(nodes[j]) == key {
+				nodes[j] = updates[i]
+				break
+			}
+		}
+	}
+}
+
 func runSpeedTest(parent context.Context, n sub.Node, opts Options) (float64, float64, error) {
 	return runSpeedTestWithProgress(parent, n, opts, nil)
 }
 
 func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, progress func(check.SpeedProgress)) (float64, float64, error) {
+	return runSpeedTestWithProvider(parent, n, opts, opts.SpeedProvider, progress)
+}
+
+func runSpeedTestWithProvider(parent context.Context, n sub.Node, opts Options, provider string, progress func(check.SpeedProgress)) (float64, float64, error) {
 	var down, up float64
 	err := withNodeClient(parent, n, opts, opts.SpeedTimeout, func(ctx context.Context, client *http.Client) error {
 		testCtx, cancel := context.WithTimeout(ctx, opts.SpeedTimeout)
 		defer cancel()
 		var testErr error
-		if opts.SpeedProvider == "ookla" {
+		if strings.EqualFold(strings.TrimSpace(provider), "ookla") {
 			down, up, testErr = check.OoklaSpeedTestWithProgress(testCtx, client, opts.MaxSpeedDuration, progress)
 		} else {
 			down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress, opts.FirstByteTimeout, opts.MaxSpeedDuration, opts.SpeedSampleInterval)
@@ -1598,8 +2214,8 @@ func renderNodeName(template, country string, download, upload float64) string {
 	return strings.NewReplacer(
 		"{flag}", flag,
 		"{country}", countryName,
-		"{download}", formatMbps(download, 0),
-		"{upload}", formatMbps(upload, 0),
+		"{download}", formatMbps(download),
+		"{upload}", formatMbps(upload),
 	).Replace(template)
 }
 
@@ -1739,7 +2355,7 @@ func countryFlag(code string) string {
 	return string([]rune{rune(0x1F1E6 + int(code[0]) - 65), rune(0x1F1E6 + int(code[1]) - 65)})
 }
 
-func formatMbps(value float64, _ int) string {
+func formatMbps(value float64) string {
 	// Round Mbps to the nearest whole number for names and summaries.
 	return strconv.FormatInt(int64(math.Round(value)), 10)
 }
@@ -1812,35 +2428,87 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 // cleanOutputArtifacts removes only filenames previously generated by SubWatch.
 // The output directory is a result directory, so stale stage and split files
 // from older versions must not survive a new run.
-func cleanOutputArtifacts(dir string) error {
+func outputProtocolNames() []string {
+	return []string{
+		"vless", "vmess", "trojan", "ss", "shadowsocks",
+		"hysteria", "hysteria2", "tuic", "socks", "socks5", "http", "unknown",
+	}
+}
+
+func removeStableOutputArtifacts(dir string) error {
+	for _, base := range []string{"stable-url-tested", "stable-speedtested"} {
+		for _, name := range stableProtocolOutputNames(base) {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if err := os.Remove(filepath.Join(dir, base+".txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func stableProtocolOutputNames(base string) []string {
+	names := make([]string, 0, len(outputProtocolNames()))
+	for _, protocol := range outputProtocolNames() {
+		names = append(names, base+"-"+protocol+".txt")
+	}
+	return names
+}
+
+func cleanOutputArtifacts(dir string, preserveStability ...bool) error {
+	if len(preserveStability) == 0 || !preserveStability[0] {
+		if err := removeStableOutputArtifacts(dir); err != nil {
+			return err
+		}
+	}
 	known := []string{
-		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
-		"speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
+		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
+		"speedtested.txt", "speed-test-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
-		"speedtest-finished.json", "speedtest-failed.json", "tested.json", "service-check-results.json", "final.json",
+		"speed-test-finished.json", "speedtest-finished.json", "speedtest-failed.json", "tested.json", "service-check-results.json", "final.json",
 	}
 	for _, name := range known {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	// Protocol-only lists from earlier runs are named <protocol>.txt.
-	for _, protocol := range []string{"vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "socks", "http", "unknown"} {
+	// Protocol-only lists from earlier releases used bare protocol names.
+	for _, protocol := range outputProtocolNames() {
 		if err := os.Remove(filepath.Join(dir, protocol+".txt")); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	patterns := []string{"*-*.txt", "*-*.json"}
-	for _, pattern := range patterns {
-		paths, err := filepath.Glob(filepath.Join(dir, pattern))
-		if err != nil {
-			return err
-		}
-		for _, path := range paths {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
+
+	// Split output names are deterministic: <stage>-<protocol>.<extension>.
+	// Remove only those exact generated names instead of globbing user files.
+	protocols := outputProtocolNames()
+	splitBases := []string{
+		"all", "unique", "selected",
+		"url-tested", "url-test-finished", "url-test-failed",
+		"speedtested", "speed-test-finished", "speedtest-finished", "speedtest-failed",
+		"tested", "service-check-results", "final", "gemini",
+	}
+	for _, base := range splitBases {
+		for _, protocol := range protocols {
+			for _, extension := range []string{".txt", ".json"} {
+				path := filepath.Join(dir, base+"-"+protocol+extension)
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
 			}
+		}
+	}
+	// Interrupted atomic writes can leave temporary files behind after a crash.
+	temps, err := filepath.Glob(filepath.Join(dir, ".subwatch-*.tmp"))
+	if err != nil {
+		return err
+	}
+	for _, path := range temps {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 	}
 	return nil
@@ -1873,10 +2541,10 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 	if err := writeSubscription(filepath.Join(dir, "all.txt"), allNodes); err != nil {
 		return err
 	}
-	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", urlNodes, true); err != nil {
 		return err
 	}
-	return writeStageFiles(dir, "speed-test-finished", speedNodes, true)
+	return writeStageFiles(dir, "speedtested", speedNodes, true)
 }
 
 func markGeminiNodes(nodes []sub.Node) error {
@@ -1921,6 +2589,14 @@ func applyNodeUpdatesByIdentity(nodes, updates []sub.Node) {
 
 // removeLegacyJSONArtifacts clears output snapshots from versions that exported
 // Node structures as JSON. It only touches known SubWatch-generated names.
+func splitJSONArtifactPaths(dir, base string) []string {
+	paths := make([]string, 0, len(outputProtocolNames()))
+	for _, protocol := range outputProtocolNames() {
+		paths = append(paths, filepath.Join(dir, base+"-"+protocol+".json"))
+	}
+	return paths
+}
+
 func removeLegacyJSONArtifacts(dir string) error {
 	bases := []string{
 		"all", "unique", "selected",
@@ -1929,13 +2605,7 @@ func removeLegacyJSONArtifacts(dir string) error {
 		"service-check-results", "final",
 	}
 	for _, base := range bases {
-		paths := []string{filepath.Join(dir, base+".json")}
-		splitPaths, err := filepath.Glob(filepath.Join(dir, base+"-*.json"))
-		if err != nil {
-			return err
-		}
-		paths = append(paths, splitPaths...)
-		for _, path := range paths {
+		for _, path := range append([]string{filepath.Join(dir, base+".json")}, splitJSONArtifactPaths(dir, base)...) {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("remove %s: %w", path, err)
 			}
@@ -1957,11 +2627,8 @@ func groupProtocols(nodes []sub.Node) map[string][]sub.Node {
 }
 
 func clearProtocolSubscriptions(dir, base string) error {
-	stale, err := filepath.Glob(filepath.Join(dir, base+"-*.txt"))
-	if err != nil {
-		return err
-	}
-	for _, path := range stale {
+	for _, protocol := range outputProtocolNames() {
+		path := filepath.Join(dir, base+"-"+protocol+".txt")
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -2019,31 +2686,54 @@ func writeAtomic(path string, data []byte) error {
 	return nil
 }
 
-// writeURLFailureReport creates a human-readable report with the exact reason
-// each node failed. The separate url-test-failed.txt remains a URI-only list
-// that can be imported into another proxy client.
-func writeURLFailureReport(path, target string, nodes []sub.Node) error {
+type failureRecord struct {
+	Stage     string
+	Name      string
+	Protocol  string
+	URI       string
+	Reason    string
+	LatencyMS int64
+}
+
+func failureRecordFromNode(stage string, node sub.Node, reason string) failureRecord {
+	return failureRecord{Stage: stage, Name: node.Name, Protocol: protocolOf(node), URI: node.URI, Reason: reason}
+}
+
+// writeFailureReport combines source, parsing, URL, speed, service and rename
+// issues into one human-readable report. It is diagnostic, not an importable list.
+func writeFailureReport(path, target string, failures []failureRecord) error {
 	var b strings.Builder
-	fmt.Fprintln(&b, "SubWatch URL TEST failures")
-	fmt.Fprintf(&b, "Target: %s\n", cleanLiveText(target))
-	fmt.Fprintf(&b, "Failed nodes: %d\n", len(nodes))
-	if len(nodes) == 0 {
-		fmt.Fprintln(&b, "\nNo URL test failures.")
+	fmt.Fprintln(&b, "SubWatch failures")
+	fmt.Fprintf(&b, "URL test target: %s\n", cleanLiveText(target))
+	fmt.Fprintf(&b, "Total issues: %d\n", len(failures))
+	if len(failures) == 0 {
+		fmt.Fprintln(&b, "\nNo failures recorded.")
 		return writeAtomic(path, []byte(b.String()))
 	}
-	for i, n := range nodes {
-		name := cleanLiveText(n.Name)
+	for i, failure := range failures {
+		stage := cleanLiveText(failure.Stage)
+		if stage == "" {
+			stage = "UNKNOWN"
+		}
+		name := cleanLiveText(failure.Name)
 		if name == "" {
-			name = "unnamed config"
+			name = "unnamed item"
 		}
-		reason := cleanLiveText(n.URLError)
+		reason := cleanLiveText(failure.Reason)
 		if reason == "" {
-			reason = "URL test failed without an error message"
+			reason = "failed without an error message"
 		}
-		fmt.Fprintf(&b, "\n[%d] %s (%s)\n", i+1, name, protocolOf(n))
-		fmt.Fprintf(&b, "Latency: %d ms\n", n.URLLatencyMS)
-		fmt.Fprintf(&b, "Reason: %s\n", reason)
-		fmt.Fprintf(&b, "URI: %s\n", cleanLiveText(n.URI))
+		fmt.Fprintf(&b, "\n[%d] %s — %s", i+1, stage, name)
+		if failure.Protocol != "" {
+			fmt.Fprintf(&b, " (%s)", cleanLiveText(failure.Protocol))
+		}
+		fmt.Fprintf(&b, "\nReason: %s\n", reason)
+		if failure.LatencyMS > 0 {
+			fmt.Fprintf(&b, "Latency: %d ms\n", failure.LatencyMS)
+		}
+		if failure.URI != "" {
+			fmt.Fprintf(&b, "URI: %s\n", cleanLiveText(failure.URI))
+		}
 	}
 	return writeAtomic(path, []byte(b.String()))
 }
@@ -2052,20 +2742,6 @@ func writeSubscription(path string, nodes []sub.Node) error {
 	var b strings.Builder
 	for _, n := range nodes {
 		b.WriteString(n.URI)
-		b.WriteByte('\n')
-	}
-	return writeAtomic(path, []byte(b.String()))
-}
-
-// writeInvalidLines keeps rejected proxy entries as plain input lines.
-func writeInvalidLines(path string, lines []string) error {
-	var b strings.Builder
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		b.WriteString(line)
 		b.WriteByte('\n')
 	}
 	return writeAtomic(path, []byte(b.String()))

@@ -1,6 +1,8 @@
 {
   "network": {
-    "interface": "auto"
+    "interface": "auto",
+    "isolate_source_downloads": false,
+    "retry_on_connection_error": false
   },
   "sources": {
     "file": "sources.txt",
@@ -11,12 +13,13 @@
   },
   "url_test": {
     "url": "https://www.gstatic.com/generate_204",
-    "concurrency": 15,
-    "timeout": "10s"
+    "concurrency": 8,
+    "timeout": "12s"
   },
   "speed_test": {
     "provider": "cloudflare",
-    "concurrency": 4,
+    "cloudflare_fallback": false,
+    "concurrency": 2,
     "timeout": "85s",
     "first_byte_timeout": "10s",
     "max_duration": "30s",
@@ -34,25 +37,28 @@
     "lookup_ip": false,
     "rename_nodes": true,
     "geoip_url": "https://ipwho.is/",
-    "name_format": "{flag} {country} {download}↓{upload}↑",
-    "speed_decimals": 1
+    "name_format": "{flag} {country} {download}↓{upload}↑"
+  },
+  "live_display": {
+    "mode": "after_result"
+  },
+  "stability": {
+    "max_ping_ms": 100
   },
   "output": {
     "directory": "out",
-    "split_by_protocol": true,
-    "subscription_text": true,
     "gemini_file": true
   },
   "remote_upload": {
     "enabled": false,
     "method": "sftp",
-    "host": "67.67.67.676",
+    "host": "example.com",
     "port": 22,
     "username": "ubuntu",
     "auth": "private_key",
-    "private_key": "~/Downloads/nigger.key",
+    "private_key": "~/.ssh/id_ed25519",
     "password": "",
-    "remote_directory": "/home/ubuntu/oklol/pidarasy",
+    "remote_directory": "/home/ubuntu/subwatch/out",
     "interface": ""
   }
 }

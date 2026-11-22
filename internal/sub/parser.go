@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -592,15 +593,15 @@ func parseShadowsocks(u *url.URL, raw string) (map[string]any, error) {
 			return nil, errors.New("invalid shadowsocks URI")
 		}
 		cred := strings.SplitN(decoded[:at], ":", 2)
-		hp := strings.Split(decoded[at+1:], ":")
-		if len(cred) != 2 || len(hp) != 2 {
+		server, portText, splitErr := net.SplitHostPort(decoded[at+1:])
+		if len(cred) != 2 || splitErr != nil || server == "" {
 			return nil, errors.New("invalid shadowsocks payload")
 		}
-		portn, _ := strconv.Atoi(hp[1])
-		if portn < 1 || portn > 65535 {
+		portn, parseErr := strconv.Atoi(portText)
+		if parseErr != nil || portn < 1 || portn > 65535 {
 			return nil, errors.New("invalid shadowsocks port")
 		}
-		return map[string]any{"type": "shadowsocks", "server": hp[0], "server_port": portn, "method": cred[0], "password": cred[1]}, nil
+		return map[string]any{"type": "shadowsocks", "server": server, "server_port": portn, "method": cred[0], "password": cred[1]}, nil
 	}
 	userinfo := u.User
 	if userinfo == nil {

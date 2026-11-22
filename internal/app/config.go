@@ -24,6 +24,7 @@ type Options struct {
 	URLConcurrency     int
 	SpeedConcurrency   int
 	SpeedProvider      string
+	CloudflareFallback bool
 	ServiceConcurrency int
 	URLTimeout         time.Duration
 	SpeedTimeout       time.Duration
@@ -33,7 +34,6 @@ type Options struct {
 	RenameNodes        bool
 	GeoIPURL           string
 	NameFormat         string
-	SpeedDecimals      int
 	ServiceTimeout     time.Duration
 	URL                string
 	SpeedDownloadURL   string
@@ -42,10 +42,12 @@ type Options struct {
 	UploadBytes        int64
 	MinDownload        float64
 	MinUpload          float64
-	SplitByProtocol    bool
-	WriteText          bool
 	LookupIP           bool
 	RemoteUpload       RemoteUploadOptions
+	LiveDisplayMode    string
+	StabilityMaxPingMS     int64
+	StabilityState         *StabilityState
+	RetryOnConnectionError bool
 }
 
 type RemoteUploadOptions struct {
@@ -59,12 +61,14 @@ type RemoteUploadOptions struct {
 	Password        string
 	RemoteDirectory string
 	Interface       string
+	RetryOnConnectionError bool
 }
 
 type fileConfig struct {
 	Network struct {
 		Interface              string `json:"interface"`
 		IsolateSourceDownloads bool   `json:"isolate_source_downloads"`
+		RetryOnConnectionError bool   `json:"retry_on_connection_error"`
 	} `json:"network"`
 	Sources struct {
 		File    string `json:"file"`
@@ -81,6 +85,7 @@ type fileConfig struct {
 	SpeedTest struct {
 		Concurrency   int      `json:"concurrency"`
 		Provider      string   `json:"provider"`
+		CloudflareFallback bool `json:"cloudflare_fallback"`
 		Timeout       string   `json:"timeout"`
 		MinDownload   *float64 `json:"min_download_mbps"`
 		MinUpload     *float64 `json:"min_upload_mbps"`
@@ -99,7 +104,6 @@ type fileConfig struct {
 		RenameNodes *bool `json:"rename_nodes"`
 		GeoIPURL string `json:"geoip_url"`
 		NameFormat string `json:"name_format"`
-		SpeedDecimals *int `json:"speed_decimals"`
 	} `json:"service_check"`
 	RemoteUpload struct {
 		Enabled         bool   `json:"enabled"`
@@ -113,28 +117,32 @@ type fileConfig struct {
 		RemoteDirectory string `json:"remote_directory"`
 		Interface       string `json:"interface"`
 	} `json:"remote_upload"`
+	LiveDisplay struct {
+		Mode string `json:"mode"`
+	} `json:"live_display"`
+	Stability struct {
+		MaxPingMS *int64 `json:"max_ping_ms"`
+	} `json:"stability"`
 	Output struct {
 		Directory        string `json:"directory"`
-		SplitByProtocol  bool   `json:"split_by_protocol"`
-		SubscriptionText *bool  `json:"subscription_text"`
 		GeminiFile       *bool  `json:"gemini_file"`
 	} `json:"output"`
 }
 
 func DefaultOptions() Options {
 	return Options{
-		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true,
+		Sources: "sources.txt", SourceTimeout: 30 * time.Second, OutDir: "out", Interface: "auto", GeminiFile: true, LiveDisplayMode: "after_result", StabilityMaxPingMS: 100,
 		Protocols:      []string{"vless", "vmess", "trojan", "ss", "hysteria", "hysteria2", "tuic", "socks", "http"},
 		URLConcurrency: 8, SpeedConcurrency: 2, ServiceConcurrency: 4, SpeedProvider: "cloudflare",
 		URLTimeout: 12 * time.Second, SpeedTimeout: 85 * time.Second,
 		FirstByteTimeout: 10 * time.Second, MaxSpeedDuration: 30 * time.Second, SpeedSampleInterval: 500 * time.Millisecond, RenameNodes: true,
-		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {country} {download}↓{upload}↑", SpeedDecimals: 1,
+		GeoIPURL: "https://ipwho.is/", NameFormat: "{flag} {country} {download}↓{upload}↑",
 		ServiceTimeout:   25 * time.Second,
 		URL:              "https://www.gstatic.com/generate_204",
 		SpeedDownloadURL: "https://speed.cloudflare.com/__down?bytes={bytes}",
 		SpeedUploadURL:   "https://speed.cloudflare.com/__up",
 		DownloadBytes:    2 << 20, UploadBytes: 2 << 20,
-		MinDownload: 8, MinUpload: 8, WriteText: true,
+		MinDownload: 8, MinUpload: 8,
 	}
 }
 
@@ -161,6 +169,7 @@ func LoadOptions(path string) (Options, error) {
 		opts.Interface = cfg.Network.Interface
 	}
 	opts.IsolateSourceDownloads = cfg.Network.IsolateSourceDownloads
+	opts.RetryOnConnectionError = cfg.Network.RetryOnConnectionError
 	if cfg.Sources.File != "" {
 		opts.Sources = cfg.Sources.File
 	}
@@ -193,8 +202,12 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.SpeedTest.Provider != "" {
 		opts.SpeedProvider = strings.ToLower(strings.TrimSpace(cfg.SpeedTest.Provider))
 	}
+	opts.CloudflareFallback = cfg.SpeedTest.CloudflareFallback
 	if opts.SpeedProvider != "cloudflare" && opts.SpeedProvider != "ookla" {
 		return opts, fmt.Errorf("speed_test.provider must be cloudflare or ookla")
+	}
+	if opts.CloudflareFallback && opts.SpeedProvider != "ookla" {
+		return opts, fmt.Errorf("speed_test.cloudflare_fallback requires speed_test.provider=ookla")
 	}
 	if cfg.SpeedTest.Concurrency > 0 {
 		opts.SpeedConcurrency = cfg.SpeedTest.Concurrency
@@ -220,7 +233,7 @@ func LoadOptions(path string) (Options, error) {
 		opts.MinUpload = *cfg.SpeedTest.MinUpload
 	}
 
-	if opts.SpeedProvider == "cloudflare" {
+	if opts.SpeedProvider == "cloudflare" || opts.CloudflareFallback {
 		for _, item := range []struct {
 			name   string
 			value  string
@@ -275,7 +288,6 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.ServiceCheck.GeoIPURL != "" { opts.GeoIPURL = cfg.ServiceCheck.GeoIPURL }
 	if cfg.ServiceCheck.NameFormat != "" { opts.NameFormat = cfg.ServiceCheck.NameFormat }
 	if opts.NameFormat != "" && !strings.Contains(opts.NameFormat, "{flag}") && !strings.Contains(opts.NameFormat, "{country}") && !strings.Contains(opts.NameFormat, "{download}") && !strings.Contains(opts.NameFormat, "{upload}") { return opts, fmt.Errorf("service_check.name_format must include {flag}, {country}, {download}, or {upload}") }
-	if cfg.ServiceCheck.SpeedDecimals != nil { if *cfg.ServiceCheck.SpeedDecimals < 0 || *cfg.ServiceCheck.SpeedDecimals > 3 { return opts, fmt.Errorf("service_check.speed_decimals must be between 0 and 3") }; opts.SpeedDecimals = *cfg.ServiceCheck.SpeedDecimals }
 	if cfg.RemoteUpload.Enabled {
 		r := cfg.RemoteUpload
 		if r.Method == "" {
@@ -307,14 +319,23 @@ func LoadOptions(path string) (Options, error) {
 				r.PrivateKey = filepath.Join(home, r.PrivateKey[2:])
 			}
 		}
-		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory, Interface: strings.TrimSpace(r.Interface)}
+		opts.RemoteUpload = RemoteUploadOptions{Enabled: r.Enabled, Method: r.Method, Host: r.Host, Port: r.Port, Username: r.Username, Auth: r.Auth, PrivateKey: r.PrivateKey, Password: r.Password, RemoteDirectory: r.RemoteDirectory, Interface: strings.TrimSpace(r.Interface), RetryOnConnectionError: opts.RetryOnConnectionError}
+	}
+	if cfg.LiveDisplay.Mode != "" {
+		mode := strings.ToLower(strings.TrimSpace(cfg.LiveDisplay.Mode))
+		if mode != "after_result" && mode != "immediate" {
+			return opts, fmt.Errorf("live_display.mode must be after_result or immediate")
+		}
+		opts.LiveDisplayMode = mode
+	}
+	if cfg.Stability.MaxPingMS != nil {
+		if *cfg.Stability.MaxPingMS <= 0 {
+			return opts, fmt.Errorf("stability.max_ping_ms must be greater than zero")
+		}
+		opts.StabilityMaxPingMS = *cfg.Stability.MaxPingMS
 	}
 	if cfg.Output.Directory != "" {
 		opts.OutDir = cfg.Output.Directory
-	}
-	opts.SplitByProtocol = cfg.Output.SplitByProtocol
-	if cfg.Output.SubscriptionText != nil {
-		opts.WriteText = *cfg.Output.SubscriptionText
 	}
 	if cfg.Output.GeminiFile != nil {
 		opts.GeminiFile = *cfg.Output.GeminiFile
@@ -375,7 +396,8 @@ func ExampleConfig() string {
 	return `{
   "network": {
     "interface": "auto",
-    "isolate_source_downloads": false
+    "isolate_source_downloads": false,
+    "retry_on_connection_error": false
   },
   "sources": {
     "file": "sources.txt",
@@ -391,6 +413,7 @@ func ExampleConfig() string {
   },
   "speed_test": {
     "provider": "cloudflare",
+    "cloudflare_fallback": false,
     "concurrency": 2,
     "timeout": "85s",
     "first_byte_timeout": "10s",
@@ -409,25 +432,28 @@ func ExampleConfig() string {
     "lookup_ip": false,
     "rename_nodes": true,
     "geoip_url": "https://ipwho.is/",
-    "name_format": "{flag} {country} {download}↓{upload}↑",
-    "speed_decimals": 1
+    "name_format": "{flag} {country} {download}↓{upload}↑"
+  },
+  "live_display": {
+    "mode": "after_result"
+  },
+  "stability": {
+    "max_ping_ms": 100
   },
   "output": {
     "directory": "out",
-    "split_by_protocol": true,
-    "subscription_text": true,
     "gemini_file": true
   },
   "remote_upload": {
     "enabled": false,
     "method": "sftp",
-    "host": "79.72.16.241",
+    "host": "example.com",
     "port": 22,
     "username": "ubuntu",
     "auth": "private_key",
     "private_key": "~/.ssh/id_ed25519",
     "password": "",
-    "remote_directory": "/home/ubuntu/oklol/pidarasy",
+    "remote_directory": "/home/ubuntu/subwatch/out",
     "interface": ""
   }
 }
