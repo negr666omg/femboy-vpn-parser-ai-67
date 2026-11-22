@@ -2,6 +2,8 @@
 
 package core
 
+const namespacePolicyPriority = 0
+
 import (
 	"context"
 	"encoding/binary"
@@ -213,14 +215,21 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	if err := run(defaultRoute...); err != nil {
 		return fail(fmt.Errorf("add isolated default route through %s: %w", it.Name, err))
 	}
-	if err := run("ip", "-4", "rule", "add", "pref", "1", "to", ns.subnet, "lookup", "main"); err != nil {
+	// Priority 0 places both narrowly scoped rules immediately after the
+	// kernel's mandatory local-table rule and before VPN catch-all rules.
+	// A later priority (such as 2) can silently lose to a VPN rule at pref 1.
+	priority := strconv.Itoa(namespacePolicyPriority)
+	if err := run("ip", "-4", "rule", "add", "pref", priority, "to", ns.subnet, "lookup", "main"); err != nil {
 		return fail(fmt.Errorf("add return route policy rule: %w", err))
 	}
 	ns.returnRuleCreated = true
-	if err := run("ip", "-4", "rule", "add", "pref", "2", "iif", ns.hostVeth, "lookup", strconv.Itoa(ns.routeTable)); err != nil {
+	if err := run("ip", "-4", "rule", "add", "pref", priority, "iif", ns.hostVeth, "lookup", strconv.Itoa(ns.routeTable)); err != nil {
 		return fail(fmt.Errorf("add selected-interface policy rule: %w", err))
 	}
 	ns.egressRuleCreated = true
+	if err := ns.verifyEgressRoute(ctx); err != nil {
+		return fail(err)
+	}
 
 	if err := ns.enableForwarding(ctx); err != nil {
 		return fail(fmt.Errorf("enable temporary IPv4 forwarding: %w", err))
@@ -231,6 +240,29 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 
 	fmt.Fprintf(output, "[network] isolated namespace %s is online via %s (existing host address %s; no extra DHCP/MAC)\n", ns.Name, it.Name, interfaceIP)
 	return ns, nil
+}
+
+func (n *NetworkNamespace) verifyEgressRoute(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "ip", "-4", "route", "get", "1.1.1.1", "from", n.ProxyIP, "iif", n.hostVeth)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("verify selected-interface routing: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	selected := routeLookupDevice(string(out))
+	if selected != n.physicalInterface {
+		return fmt.Errorf("refusing to start proxy tests: kernel routes namespace traffic through %q, expected %q; route lookup: %s", selected, n.physicalInterface, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func routeLookupDevice(output string) string {
+	fields := strings.Fields(output)
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "dev" {
+			return fields[i+1]
+		}
+	}
+	return ""
 }
 
 func selectedInterfaceRoute(ctx context.Context, iface *net.Interface) (net.IP, string, string, error) {
@@ -844,10 +876,10 @@ func (n *NetworkNamespace) Close() {
 		}
 	}
 	if n.egressRuleCreated {
-		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", "2", "iif", n.hostVeth, "lookup", strconv.Itoa(n.routeTable))
+		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", strconv.Itoa(namespacePolicyPriority), "iif", n.hostVeth, "lookup", strconv.Itoa(n.routeTable))
 	}
 	if n.returnRuleCreated {
-		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", "1", "to", n.subnet, "lookup", "main")
+		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", strconv.Itoa(namespacePolicyPriority), "to", n.subnet, "lookup", "main")
 	}
 	if n.routeTableCreated {
 		_ = n.root(ctx, "ip", "-4", "route", "flush", "table", strconv.Itoa(n.routeTable))
