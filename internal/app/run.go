@@ -762,12 +762,15 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		return fmt.Errorf("write stability markers: %w", err)
 	}
 	stableCount := 0
-	for _, streak := range streaks {
-		if streak >= stableConsecutiveCycles {
+	for key, streak := range streaks {
+		if streak >= stableConsecutiveCycles && !gamingPassedByKey[key] {
 			stableCount++
 		}
 	}
 	fmt.Fprintf(stdout, "[stability] %d nodes marked 🧱 (at least %d consecutive URL checks below %d ms)\n", stableCount, stableConsecutiveCycles, stableURLLatencyLimitMS)
+	if opts.GamingQuality.Enabled {
+		fmt.Fprintf(stdout, "[gaming] %d nodes marked 🎮 (experimental HTTP-only quality; packet loss not measured)\n", len(gamingPassedByKey))
+	}
 
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
 	perSourceEligible := make([][]sub.Node, len(perSourceNodes))
