@@ -20,6 +20,8 @@ type Options struct {
 	IsolateSourceDownloads bool
 	NetworkNamespace   string
 	NetworkNamespaceInterface string
+	NetworkNamespaceProxyIP string
+	NetworkNamespaceHostIP string
 	CorePath           string
 	Protocols          []string
 	URLConcurrency     int
