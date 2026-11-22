@@ -482,10 +482,10 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 			}
 			var probeLog bytes.Buffer
 			probeOutput := io.MultiWriter(stdout, &probeLog)
-			fmt.Fprintf(stdout, "[network] direct egress preflight through %s (before proxy tests)\\n", opts.Interface)
+			fmt.Fprintf(stdout, "[network] direct egress preflight through %s (before proxy tests)\n", opts.Interface)
 			probeErr := ns.Preflight(ctx, opts.URL, probeTimeout, probeOutput)
 			if writeErr := os.WriteFile(filepath.Join(opts.OutDir, "network-preflight.log"), probeLog.Bytes(), 0600); writeErr != nil {
-				fmt.Fprintf(stderr, "failed to save network preflight log: %v\\n", writeErr)
+				fmt.Fprintf(stderr, "failed to save network preflight log: %v\n", writeErr)
 			}
 			if probeErr != nil {
 				return fmt.Errorf("network preflight failed; all proxy tests were skipped: %w", probeErr)
