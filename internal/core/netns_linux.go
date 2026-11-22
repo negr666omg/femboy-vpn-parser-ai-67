@@ -341,7 +341,11 @@ func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string
 		"172.16.0.0/12",
 		"192.168.0.0/16",
 		"100.64.0.0/10",
+		"169.254.0.0/16",
 		"198.18.0.0/15",
+		"192.0.2.0/24",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
 	} {
 		_, pool, parseErr := net.ParseCIDR(poolCIDR)
 		if parseErr != nil {
@@ -381,7 +385,7 @@ func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string
 			}
 		}
 	}
-	return nil, "", "", fmt.Errorf("no unused /30 subnet found in private/shared/benchmark address pools (10/8, 172.16/12, 192.168/16, 100.64/10, 198.18/15); existing routes cover all candidates")
+	return nil, "", "", fmt.Errorf("no unused /30 subnet found in private/link-local/benchmark address pools (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, 198.18/15, 192.0.2/24, 198.51.100/24, 203.0.113/24); existing routes or addresses conflict with every candidate")
 }
 
 // networkFullyCoveredByRoute avoids scanning all addresses in a /16 when an
