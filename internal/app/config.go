@@ -24,6 +24,7 @@ type Options struct {
 	URLConcurrency     int
 	SpeedConcurrency   int
 	SpeedProvider      string
+	CloudflareFallback bool
 	ServiceConcurrency int
 	URLTimeout         time.Duration
 	SpeedTimeout       time.Duration
@@ -81,6 +82,9 @@ type fileConfig struct {
 	SpeedTest struct {
 		Concurrency   int      `json:"concurrency"`
 		Provider      string   `json:"provider"`
+		CloudflareFallback struct {
+			Enabled bool `json:"enabled"`
+		} `json:"cloudflare_fallback"`
 		Timeout       string   `json:"timeout"`
 		MinDownload   *float64 `json:"min_download_mbps"`
 		MinUpload     *float64 `json:"min_upload_mbps"`
@@ -193,8 +197,12 @@ func LoadOptions(path string) (Options, error) {
 	if cfg.SpeedTest.Provider != "" {
 		opts.SpeedProvider = strings.ToLower(strings.TrimSpace(cfg.SpeedTest.Provider))
 	}
+	opts.CloudflareFallback = cfg.SpeedTest.CloudflareFallback.Enabled
 	if opts.SpeedProvider != "cloudflare" && opts.SpeedProvider != "ookla" {
 		return opts, fmt.Errorf("speed_test.provider must be cloudflare or ookla")
+	}
+	if opts.CloudflareFallback && opts.SpeedProvider != "ookla" {
+		return opts, fmt.Errorf("speed_test.cloudflare_fallback.enabled requires speed_test.provider=ookla")
 	}
 	if cfg.SpeedTest.Concurrency > 0 {
 		opts.SpeedConcurrency = cfg.SpeedTest.Concurrency
@@ -220,7 +228,7 @@ func LoadOptions(path string) (Options, error) {
 		opts.MinUpload = *cfg.SpeedTest.MinUpload
 	}
 
-	if opts.SpeedProvider == "cloudflare" {
+	if opts.SpeedProvider == "cloudflare" || opts.CloudflareFallback {
 		for _, item := range []struct {
 			name   string
 			value  string
@@ -391,6 +399,9 @@ func ExampleConfig() string {
   },
   "speed_test": {
     "provider": "cloudflare",
+    "cloudflare_fallback": {
+      "enabled": false
+    },
     "concurrency": 2,
     "timeout": "85s",
     "first_byte_timeout": "10s",
