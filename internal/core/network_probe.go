@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,18 +12,23 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Preflight runs a direct HTTP request from inside the isolated namespace.
-// It deliberately does not use sing-box or proxy environment variables: a
-// failure here means the namespace's own DNS/routing/NAT path is unhealthy.
-func (n *NetworkNamespace) Preflight(ctx context.Context, target string, timeout time.Duration, output io.Writer) error {
+// Preflight checks TCP reachability to actual proxy endpoints from inside
+// the isolated namespace. Testing the URL-test target directly is incorrect:
+// the target is reached through each proxy, while the namespace only needs
+// direct connectivity to proxy servers.
+func (n *NetworkNamespace) Preflight(ctx context.Context, targets []string, timeout time.Duration, output io.Writer) error {
 	if n == nil || strings.TrimSpace(n.Name) == "" {
 		return fmt.Errorf("network namespace is not initialized")
 	}
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = 12 * time.Second
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no proxy server endpoints available for network preflight")
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -33,7 +39,7 @@ func (n *NetworkNamespace) Preflight(ctx context.Context, target string, timeout
 		"-n", "ip", "netns", "exec", n.Name,
 		"setpriv", "--reuid", uid, "--regid", gid, "--init-groups",
 		executable, "__network-probe",
-		"--url", target,
+		"--tcp-targets", strings.Join(targets, ","),
 		"--timeout", timeout.String(),
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout+3*time.Second)
@@ -45,10 +51,182 @@ func (n *NetworkNamespace) Preflight(ctx context.Context, target string, timeout
 	}
 	if runErr != nil {
 		detail := strings.TrimSpace(string(data))
+		if output != nil {
+			n.appendNetworkDiagnostics(ctx, output)
+		}
 		if detail != "" {
 			return fmt.Errorf("isolated network preflight failed: %w: %s", runErr, detail)
 		}
 		return fmt.Errorf("isolated network preflight failed: %w", runErr)
+	}
+	return nil
+}
+
+func (n *NetworkNamespace) appendNetworkDiagnostics(ctx context.Context, output io.Writer) {
+	if output == nil {
+		return
+	}
+	type diagnostic struct {
+		label string
+		args  []string
+	}
+	items := []diagnostic{
+		{"namespace routes", []string{"ip", "-n", n.Name, "-4", "route", "show", "table", "all"}},
+		{"host policy rules", []string{"ip", "-4", "rule", "show"}},
+		{"selected-interface route table", []string{"ip", "-4", "route", "show", "table", strconv.Itoa(n.routeTable)}},
+		{"host route lookup from namespace", []string{"ip", "-4", "route", "get", "1.1.1.1", "from", n.ProxyIP, "iif", n.hostVeth}},
+	}
+	if n.firewallBackend == "nft" {
+		items = append(items, diagnostic{"temporary nftables counters", []string{"nft", "-a", "list", "table", "ip", n.firewallTable}})
+	} else if n.firewallBackend == "iptables" {
+		items = append(items,
+			diagnostic{"iptables forward counters", []string{"iptables", "-vnL", "FORWARD"}},
+			diagnostic{"iptables NAT counters", []string{"iptables", "-t", "nat", "-vnL", "POSTROUTING"}},
+		)
+	}
+	fmt.Fprintln(output, "[preflight] ---- network diagnostics (captured before cleanup) ----")
+	for _, item := range items {
+		diagCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		cmd := exec.CommandContext(diagCtx, "sudo", append([]string{"-n"}, item.args...)...)
+		data, err := cmd.CombinedOutput()
+		cancel()
+		fmt.Fprintf(output, "[preflight] %s:\n", item.label)
+		if len(data) > 0 {
+			_, _ = output.Write(data)
+			if data[len(data)-1] != '\n' {
+				fmt.Fprintln(output)
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(output, "[preflight] diagnostic command failed: %v\n", err)
+		}
+	}
+	fmt.Fprintln(output, "[preflight] ---- end network diagnostics ----")
+}
+
+// RunNetworkTCPProbe runs direct TCP probes against a sample of proxy
+// server:port endpoints. At least one reachable endpoint is enough to establish
+// that the namespace can reach proxy servers; individual dead nodes are normal.
+func RunNetworkTCPProbe(rawTargets string, timeout time.Duration, output io.Writer) error {
+	if output == nil {
+		output = io.Discard
+	}
+	if timeout <= 0 {
+		timeout = 12 * time.Second
+	}
+	targets := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, raw := range strings.Split(rawTargets, ",") {
+		target := strings.TrimSpace(raw)
+		if target == "" || seen[target] {
+			continue
+		}
+		host, port, err := net.SplitHostPort(target)
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("invalid proxy endpoint %q (expected host:port)", target)
+		}
+		if _, err := strconv.Atoi(port); err != nil {
+			return fmt.Errorf("invalid port in proxy endpoint %q", target)
+		}
+		seen[target] = true
+		targets = append(targets, target)
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no valid proxy endpoints supplied")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	type result struct {
+		target  string
+		ip      string
+		elapsed time.Duration
+		err     error
+	}
+	results := make([]result, len(targets))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	workerCount := 8
+	if len(targets) < workerCount {
+		workerCount = len(targets)
+	}
+	for worker := 0; worker < workerCount; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for i := range jobs {
+				results[i].target = targets[i]
+				host, port, _ := net.SplitHostPort(targets[i])
+				started := time.Now()
+				ips, lookupErr := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+				if lookupErr != nil {
+					results[i].err = fmt.Errorf("DNS: %w", lookupErr)
+					results[i].elapsed = time.Since(started)
+					continue
+				}
+				if len(ips) == 0 {
+					results[i].err = fmt.Errorf("DNS returned no IPv4 addresses")
+					results[i].elapsed = time.Since(started)
+					continue
+				}
+				dialer := &net.Dialer{Timeout: minDuration(timeout/2, 3*time.Second)}
+				var lastErr error
+				for _, ip := range ips {
+					conn, dialErr := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+					if dialErr != nil {
+						lastErr = dialErr
+						if ctx.Err() != nil {
+							break
+						}
+						continue
+					}
+					results[i].ip = ip.String()
+					_ = conn.Close()
+					lastErr = nil
+					break
+				}
+				results[i].elapsed = time.Since(started)
+				results[i].err = lastErr
+				if results[i].err == nil && results[i].ip == "" {
+					results[i].err = errors.New("TCP connection failed without a reported cause")
+				}
+			}
+		}()
+	}
+	for i := range targets {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			break
+		}
+	}
+	close(jobs)
+	workers.Wait()
+
+	successes := 0
+	failures := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.target == "" {
+			continue
+		}
+		if result.err == nil && result.ip != "" {
+			successes++
+			fmt.Fprintf(output, "[preflight] TCP OK: %s via %s in %s\n", result.target, result.ip, result.elapsed.Round(time.Millisecond))
+		} else {
+			message := "unknown error"
+			if result.err != nil {
+				message = result.err.Error()
+			}
+			fmt.Fprintf(output, "[preflight] TCP FAIL: %s: %s\n", result.target, message)
+			failures = append(failures, result.target+": "+message)
+		}
+	}
+	fmt.Fprintf(output, "[preflight] reachable proxy endpoints: %d/%d\n", successes, len(targets))
+	if successes == 0 {
+		if ctx.Err() != nil {
+			return fmt.Errorf("no sampled proxy endpoint was reachable before timeout: %w; failures: %s", ctx.Err(), strings.Join(failures, "; "))
+		}
+		return fmt.Errorf("none of %d sampled proxy endpoints accepted TCP connections: %s", len(targets), strings.Join(failures, "; "))
 	}
 	return nil
 }
