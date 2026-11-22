@@ -36,6 +36,48 @@ func TestParseDefaultRouteForInterface(t *testing.T) {
 	}
 }
 
+func TestParseJSONDefaultRouteForInterface(t *testing.T) {
+	raw := `[
+		{"dst":"default","gateway":"10.0.0.1","dev":"throne-tun"},
+		{"dst":"default","gateway":"192.168.1.75","dev":"enp1s0","prefsrc":"192.168.1.87"},
+		{"dst":"192.168.1.0/24","dev":"enp1s0"}
+	]`
+	gateway, source, err := parseJSONRouteForInterface(raw, "enp1s0", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway != "192.168.1.75" || source != "192.168.1.87" {
+		t.Fatalf("got gateway=%q source=%q", gateway, source)
+	}
+}
+
+func TestParseJSONMultipathDefaultRouteForInterface(t *testing.T) {
+	raw := `[
+		{"dst":"default","nexthops":[
+			{"gateway":"10.0.0.1","dev":"throne-tun"},
+			{"gateway":"192.168.1.75","dev":"enp1s0"}
+		],"prefsrc":"192.168.1.87"}
+	]`
+	gateway, source, err := parseJSONRouteForInterface(raw, "enp1s0", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway != "192.168.1.75" || source != "192.168.1.87" {
+		t.Fatalf("got gateway=%q source=%q", gateway, source)
+	}
+}
+
+func TestParseJSONResolvedRouteForInterface(t *testing.T) {
+	raw := `[{"dst":"1.1.1.1","gateway":"192.168.1.75","dev":"enp1s0","prefsrc":"192.168.1.87"}]`
+	gateway, source, err := parseJSONRouteForInterface(raw, "enp1s0", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway != "192.168.1.75" || source != "192.168.1.87" {
+		t.Fatalf("got gateway=%q source=%q", gateway, source)
+	}
+}
+
 func TestParseDirectDefaultRoute(t *testing.T) {
 	gateway, source, err := parseDefaultRoute("default dev ppp0 scope link\n")
 	if err != nil {
