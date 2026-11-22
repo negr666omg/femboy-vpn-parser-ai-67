@@ -2,7 +2,6 @@ package check
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -119,5 +118,4 @@ func TestCloudflareNetworkQualityRejectsInvalidSettings(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "latency_samples") {
 		t.Fatalf("invalid sample count error = %v", err)
 	}
-	_ = fmt.Sprintf("%v", err)
 }
