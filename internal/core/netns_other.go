@@ -10,7 +10,7 @@ import (
 	"os/exec"
 )
 
-type NetworkNamespace struct { Name string; ProxyIP string }
+type NetworkNamespace struct { Name string; ProxyIP string; HostIP string }
 
 func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*NetworkNamespace, error) {
 	if iface != "" && iface != "auto" {
