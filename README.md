@@ -1,4 +1,4 @@
-# SubWatch 0.5.4
+# SubWatch 0.5.5
 
 Linux-first Go CLI for parsing and deduplicating VLESS/VMess/Trojan/Shadowsocks/Hysteria2/TUIC/SOCKS/HTTP subscription links, then testing them through sing-box.
 
