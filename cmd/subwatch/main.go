@@ -225,10 +225,10 @@ func runCommand(args []string) error {
 			return nil
 		}
 		if opts.CycleInterval > 0 {
-			fmt.Fprintf(os.Stdout, "\\n[loop] waiting %s before next cycle (Ctrl+C to stop)\\n", opts.CycleInterval)
+			fmt.Fprintf(os.Stdout, "\n[loop] waiting %s before next cycle (Ctrl+C to stop)\n", opts.CycleInterval)
 		}
 		if !waitForNextCycle(ctx, opts.CycleInterval) {
-			fmt.Fprintln(os.Stdout, "\\n[stop] Interrupted; exiting cleanly")
+			fmt.Fprintln(os.Stdout, "\n[stop] Interrupted; exiting cleanly")
 			return nil
 		}
 	}
