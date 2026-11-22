@@ -197,7 +197,8 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 		return fail(fmt.Errorf("add connected route for %s to isolated routing table: %w", it.Name, err))
 	}
 	ns.routeTableCreated = true
-	if gateway != "" && !interfacePrefix.Contains(net.ParseIP(gateway)) {
+	_, selectedPrefix, _ := net.ParseCIDR(interfacePrefix)
+	if gateway != "" && (selectedPrefix == nil || !selectedPrefix.Contains(net.ParseIP(gateway))) {
 		if err := run("ip", "-4", "route", "add", gateway+"/32", "dev", it.Name, "scope", "link", "table", strconv.Itoa(ns.routeTable)); err != nil {
 			return fail(fmt.Errorf("add off-link gateway route %s through %s: %w", gateway, it.Name, err))
 		}
@@ -375,19 +376,21 @@ func (n *NetworkNamespace) enableForwarding(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", forwardPath, err)
 	}
+	rpFilter, err := os.ReadFile(n.rpFilterPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", n.rpFilterPath, err)
+	}
 	n.ipForwardOriginal = strings.TrimSpace(string(forward))
+	n.rpFilterOriginal = strings.TrimSpace(string(rpFilter))
+
+	// Enabling forwarding can reset per-interface IPv4 defaults. Read both
+	// original values first, enable forwarding, then apply loose rp_filter.
 	if n.ipForwardOriginal != "1" {
 		if err := n.writeRootFile(ctx, forwardPath, "1"); err != nil {
 			return err
 		}
 		n.ipForwardChanged = true
 	}
-
-	rpFilter, err := os.ReadFile(n.rpFilterPath)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", n.rpFilterPath, err)
-	}
-	n.rpFilterOriginal = strings.TrimSpace(string(rpFilter))
 	if n.rpFilterOriginal != "2" {
 		if err := n.writeRootFile(ctx, n.rpFilterPath, "2"); err != nil {
 			return fmt.Errorf("set loose reverse-path filtering on the selected interface: %w", err)
