@@ -103,7 +103,6 @@ type fileConfig struct {
 		MaxDuration string `json:"max_duration"`
 		SampleInterval string `json:"sample_interval"`
 	} `json:"speed_test"`
-`
 	ServiceCheck struct {
 		Concurrency int    `json:"concurrency"`
 		Timeout     string `json:"timeout"`
@@ -147,7 +146,7 @@ func DefaultOptions() Options {
 		SpeedDownloadURL: "https://speed.cloudflare.com/__down?bytes={bytes}",
 		SpeedUploadURL:   "https://speed.cloudflare.com/__up",
 		DownloadBytes:    2 << 20, UploadBytes: 2 << 20,
-		MinDownload: 8, MinUpload: 8, WriteText: true,,
+		MinDownload: 8, MinUpload: 8, WriteText: true,
 	}
 }
 
