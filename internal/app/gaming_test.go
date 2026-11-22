@@ -39,7 +39,7 @@ func TestGamingQualityDecisionChecksIdleAndBothLoadedDirections(t *testing.T) {
 func TestLoadOptionsEnablesExperimentalGamingQuality(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	config := strings.Replace(ExampleConfig(), `"enabled": false,`, `"enabled": true,`, 1)
+	config := strings.Replace(ExampleConfig(), `"gaming_test": {\n    "enabled": false,`, `"gaming_test": {\n    "enabled": true,`, 1)
 	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
