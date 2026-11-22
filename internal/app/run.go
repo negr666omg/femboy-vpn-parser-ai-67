@@ -644,7 +644,6 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 				gamingPassedByKey[nodeIdentity(completed)] = true
 			}
 		}
-		speedResults = mergeResults(speedResults, nil, gamingResults, nil)
 		gamingPassed := filterNodes(gamingResults, func(n sub.Node) bool { return n.GamingPassed })
 		if err := applyStabilityMarkers(gamingPassed, nil, gamingPassedByKey); err != nil {
 			return fmt.Errorf("apply gaming markers to gaming-quality list: %w", err)
