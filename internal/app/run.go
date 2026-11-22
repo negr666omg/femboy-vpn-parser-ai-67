@@ -2344,16 +2344,16 @@ func qualityMarkedName(name string, stable, gaming bool) string {
 	if hasGemini {
 		name = strings.TrimSpace(strings.TrimSuffix(name, geminiNameSuffix))
 	}
-	hasGaming := false
+	// Always strip old quality suffixes first. The current cycle's measured
+	// quality decides which marker remains; stale 🎮/🧱 labels never persist.
 	for {
 		switch {
 		case strings.HasSuffix(name, gamingNameSuffix):
-			hasGaming = true
 			name = strings.TrimSpace(strings.TrimSuffix(name, gamingNameSuffix))
 		case strings.HasSuffix(name, stabilityNameSuffix):
 			name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
 		default:
-			if gaming || hasGaming {
+			if gaming {
 				name += gamingNameSuffix
 			} else if stable {
 				name += stabilityNameSuffix
@@ -2366,23 +2366,24 @@ func qualityMarkedName(name string, stable, gaming bool) string {
 	}
 }
 
-func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int) error {
+func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int, gaming map[string]bool) error {
 	for i := range nodes {
-		stable := streaks[nodeIdentity(nodes[i])] >= stableConsecutiveCycles
-		name := qualityMarkedName(nodes[i].Name, stable, false)
+		key := nodeIdentity(nodes[i])
+		stable := streaks[key] >= stableConsecutiveCycles
+		name := qualityMarkedName(nodes[i].Name, stable, gaming[key])
 		if name == nodes[i].Name {
 			continue
 		}
 		if err := sub.RenameNode(&nodes[i], name); err != nil {
-			return fmt.Errorf("rename stable node %s: %w", nodes[i].Protocol, err)
+			return fmt.Errorf("rename quality marker for node %s: %w", nodes[i].Protocol, err)
 		}
 	}
 	return nil
 }
 
-func writeStabilityResults(dir string, allNodes, urlNodes, speedNodes, geminiNodes []sub.Node, streaks map[string]int) error {
+func writeStabilityResults(dir string, allNodes, urlNodes, speedNodes, geminiNodes []sub.Node, streaks map[string]int, gaming map[string]bool) error {
 	for _, group := range [][]sub.Node{allNodes, urlNodes, speedNodes, geminiNodes} {
-		if err := applyStabilityMarkers(group, streaks); err != nil {
+		if err := applyStabilityMarkers(group, streaks, gaming); err != nil {
 			return err
 		}
 	}
