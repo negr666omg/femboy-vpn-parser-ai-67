@@ -347,49 +347,59 @@ func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string
 		if parseErr != nil {
 			continue
 		}
-		if networkFullyCoveredByRoute(pool, used) {
-			continue
-		}
 		ones, bits := pool.Mask.Size()
-		if bits != 32 || ones > 28 {
+		if bits != 32 || ones > 16 {
 			continue
 		}
-		candidateCount := 1 << uint(bits-ones-2)
-		start := pid % candidateCount
 		poolBase := binary.BigEndian.Uint32(pool.IP.To4())
-		for offset := 0; offset < candidateCount; offset++ {
-			index := (start + offset) % candidateCount
-			base := make(net.IP, net.IPv4len)
-			binary.BigEndian.PutUint32(base, poolBase+uint32(index*4))
-			candidate := &net.IPNet{IP: base, Mask: net.CIDRMask(30, 32)}
-			if overlapsAnyRoute(candidate, used) {
+		subnetCount := 1 << uint(16-ones)
+		// Search independently inside /16 chunks. This lets us skip a whole
+		// chunk covered by a VPN route instead of iterating millions of /30s.
+		for chunkIndex := 0; chunkIndex < subnetCount; chunkIndex++ {
+			chunkBase := poolBase + uint32(chunkIndex<<16)
+			chunkIP := make(net.IP, net.IPv4len)
+			binary.BigEndian.PutUint32(chunkIP, chunkBase)
+			chunk := &net.IPNet{IP: chunkIP, Mask: net.CIDRMask(16, 32)}
+			if networkFullyCoveredByRoute(chunk, used) {
 				continue
 			}
-			host := append(net.IP(nil), base...)
-			host[3]++
-			proxy := append(net.IP(nil), base...)
-			proxy[3] += 2
-			return candidate, host.String(), proxy.String(), nil
+			const candidatesPer16 = 1 << 14
+			start := pid % candidatesPer16
+			for offset := 0; offset < candidatesPer16; offset++ {
+				index := (start + offset) % candidatesPer16
+				base := make(net.IP, net.IPv4len)
+				binary.BigEndian.PutUint32(base, chunkBase+uint32(index*4))
+				candidate := &net.IPNet{IP: base, Mask: net.CIDRMask(30, 32)}
+				if overlapsAnyRoute(candidate, used) {
+					continue
+				}
+				host := append(net.IP(nil), base...)
+				host[3]++
+				proxy := append(net.IP(nil), base...)
+				proxy[3] += 2
+				return candidate, host.String(), proxy.String(), nil
+			}
 		}
 	}
 	return nil, "", "", fmt.Errorf("no unused /30 subnet found in private/shared/benchmark address pools (10/8, 172.16/12, 192.168/16, 100.64/10, 198.18/15); existing routes cover all candidates")
 }
 
-// networkFullyCoveredByRoute avoids scanning millions of addresses when an
-// existing broad VPN route (for example 10.0.0.0/8) covers an entire pool.
+// networkFullyCoveredByRoute avoids scanning all addresses in a /16 when an
+// existing broader route (for example 10.0.0.0/8) covers that entire chunk.
 func networkFullyCoveredByRoute(pool *net.IPNet, routes []*net.IPNet) bool {
 	if pool == nil {
 		return true
 	}
-	last := append(net.IP(nil), pool.IP.To4()...)
-	if len(last) != net.IPv4len {
+	first := pool.IP.To4()
+	if len(first) != net.IPv4len {
 		return true
 	}
+	last := append(net.IP(nil), first...)
 	for i := len(last) - 1; i >= 0; i-- {
 		last[i] |= ^pool.Mask[i]
 	}
 	for _, route := range routes {
-		if route.Contains(pool.IP) && route.Contains(last) {
+		if route.Contains(first) && route.Contains(last) {
 			return true
 		}
 	}
