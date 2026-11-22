@@ -1,4 +1,4 @@
-# SubWatch 0.3.9
+# SubWatch 0.4.0
 
 Linux-first Go CLI for parsing and deduplicating VLESS/VMess/Trojan/Shadowsocks/Hysteria2/TUIC/SOCKS/HTTP subscription links, then testing them through sing-box.
 
@@ -57,6 +57,7 @@ See [`config.example.json`](./config.example.json). All settings are optional; d
 - `service_check`: concurrency, timeout, optional exit-IP lookup, automatic node renaming, GeoIP endpoint, name template (`{flag}`, `{country}`, `{download}`, `{upload}`), and Mbps decimal precision. The default name is `🇩🇪 Germany 70↓34↑`. Existing templates that contain `{flag}` but omit `{country}` automatically get the country name inserted after the flag. If GeoIP is unavailable, the node is still renamed using `🌐 Unknown`. GeoIP requests always go through the tested proxy and use short, bounded fallbacks.
 - `output.directory`: output directory. Stage result files are always plain URI-only `.txt` files and are split by protocol, for example `url-test-finished-vless.txt`, `speed-test-finished-vless.txt` and `gemini-vless.txt`.
 - `output.gemini_file`: when `true` (default), create a separate `gemini.txt` plus `gemini-<protocol>.txt` lists. When `false`, do not create a Gemini-only file; instead rename Gemini-available nodes by appending `Gemini 🐱` to their remark and refresh all earlier files in which those nodes appear, including `all.txt` and both stage/protocol lists.
+- `loop.interval`: pause between complete cycles in continuous mode. Uses Go duration syntax, such as `"60s"` or `"5m"`. The default `"0s"` starts the next cycle immediately. The pause begins after the cycle (including any SFTP upload) finishes, and Ctrl+C interrupts the wait.
 
 The default speed test uses 2 MiB download and 2 MiB upload payloads, a concurrency of 2, and minimums of 8 Mbps in both directions. **8 Mbps is approximately 1 MB/s.** Speed-test concurrency is deliberately lower than URL-test concurrency because simultaneous throughput tests share the machine's internet connection and can reduce measured rates. Set it to `1` for the least contention or increase it when throughput is ample.
 
@@ -114,4 +115,4 @@ SubWatch can upload the `.txt` result files from `out/` to a remote directory af
 
 `enabled` is the only upload switch. There is no separate `upload_after_run`: when enabled, the upload happens after each completed test cycle. `auth` accepts `private_key` or `password`. Key authentication uses the local OpenSSH `ssh`/`sftp` commands. For password authentication, install `sshpass` on the machine running SubWatch and set `password` in the config; protect `config.json` because it contains a secret. SSH key authentication is recommended.
 
-On the first run, SubWatch asks whether to repeat complete test cycles continuously. Answer `y` for continuous mode or press Enter / answer `n` for one cycle. In continuous mode, SFTP upload runs after every completed cycle. Ctrl+C stops the loop cleanly.
+On the first run, SubWatch asks whether to repeat complete test cycles continuously. Answer `y` for continuous mode or press Enter / answer `n` for one cycle. In continuous mode, SFTP upload runs after every completed cycle, then SubWatch waits for `loop.interval` before starting the next one. Set it to `0s` to disable the pause. Ctrl+C stops the loop cleanly, including while it is waiting.
