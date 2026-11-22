@@ -74,6 +74,37 @@ func TestParseRouteNetworksAndOverlap(t *testing.T) {
 	}
 }
 
+func TestNetworkFullyCoveredByRoute(t *testing.T) {
+	_, whole, err := net.ParseCIDR("10.0.0.0/16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, broad, _ := net.ParseCIDR("10.0.0.0/8")
+	if !networkFullyCoveredByRoute(whole, []*net.IPNet{broad}) {
+		t.Fatal("a /8 route should cover the complete /16 candidate pool")
+	}
+	_, partial, _ := net.ParseCIDR("10.0.0.0/24")
+	if networkFullyCoveredByRoute(whole, []*net.IPNet{partial}) {
+		t.Fatal("a /24 route must not mark the entire /16 pool as covered")
+	}
+	_, disjoint, _ := net.ParseCIDR("192.168.0.0/16")
+	if networkFullyCoveredByRoute(whole, []*net.IPNet{disjoint}) {
+		t.Fatal("a disjoint route must not mark the pool as covered")
+	}
+}
+
+func TestOverlapsAnyRouteRejectsOnlyCollidingSubnet(t *testing.T) {
+	_, lan, _ := net.ParseCIDR("192.168.1.0/24")
+	_, candidateInside, _ := net.ParseCIDR("192.168.1.4/30")
+	_, candidateOutside, _ := net.ParseCIDR("192.168.2.4/30")
+	if !overlapsAnyRoute(candidateInside, []*net.IPNet{lan}) {
+		t.Fatal("candidate inside an existing LAN route was not rejected")
+	}
+	if overlapsAnyRoute(candidateOutside, []*net.IPNet{lan}) {
+		t.Fatal("candidate outside existing LAN route was incorrectly rejected")
+	}
+}
+
 func TestNftRulesUseOnlyTheSelectedInterfaceAndNamespaceIP(t *testing.T) {
 	ns := &NetworkNamespace{
 		hostVeth:      "swh123",
