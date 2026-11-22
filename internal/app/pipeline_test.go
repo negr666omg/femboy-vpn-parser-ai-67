@@ -21,6 +21,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 	data := `{
   "network":{"interface":"throne-tun","isolate_source_downloads":true},
+  "loop":{"interval":"42s"},
   "sources":{"file":"subs.txt","timeout":"90s"},
   "protocols":{"enabled":["vless","shadowsocks"]},
   "url_test":{"url":"https://example.com/204","concurrency":6,"timeout":"9s"},
@@ -42,7 +43,7 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if opts.URLConcurrency != 6 || opts.SpeedConcurrency != 3 || opts.ServiceConcurrency != 2 {
 		t.Fatalf("unexpected concurrency: %+v", opts)
 	}
-	if opts.SourceTimeout != 90*time.Second || opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second || opts.FirstByteTimeout != 0 || opts.MaxSpeedDuration != 17*time.Second || opts.SpeedSampleInterval != 0 {
+	if opts.CycleInterval != 42*time.Second || opts.SourceTimeout != 90*time.Second || opts.URLTimeout != 9*time.Second || opts.SpeedTimeout != 45*time.Second || opts.ServiceTimeout != 20*time.Second || opts.FirstByteTimeout != 0 || opts.MaxSpeedDuration != 17*time.Second || opts.SpeedSampleInterval != 0 {
 		t.Fatalf("unexpected timeouts: %+v", opts)
 	}
 	if len(opts.Protocols) != 2 || opts.Protocols[1] != "ss" {
@@ -54,6 +55,28 @@ func TestConfigLoadsStageSpecificSettings(t *testing.T) {
 	if opts.SpeedProvider != "ookla" { t.Fatalf("speed provider = %q, want ookla", opts.SpeedProvider) }
 	if opts.DownloadBytes != 0 || opts.UploadBytes != 0 || opts.SpeedDownloadURL != "" || opts.SpeedUploadURL != "" {
 		t.Fatalf("Cloudflare-only settings must be disabled for Ookla: %+v", opts)
+	}
+}
+
+func TestLoopIntervalMustBeNonNegativeDuration(t *testing.T) {
+	for _, value := range []string{"-1s", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			data := `{"loop":{"interval":"` + value + `"}}`
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadOptions(path); err == nil || !strings.Contains(err.Error(), "loop.interval") {
+				t.Fatalf("expected invalid loop.interval error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDefaultCycleIntervalIsDisabled(t *testing.T) {
+	if got := DefaultOptions().CycleInterval; got != 0 {
+		t.Fatalf("default cycle interval = %s, want 0", got)
 	}
 }
 
