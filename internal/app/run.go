@@ -352,6 +352,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.SpeedProvider != "cloudflare" && opts.SpeedProvider != "ookla" {
 		return fmt.Errorf("speed_test.provider must be cloudflare or ookla")
 	}
+	if opts.CloudflareFallback && opts.SpeedProvider != "ookla" {
+		return fmt.Errorf("speed_test.cloudflare_fallback requires speed_test.provider=ookla")
+	}
 	if opts.MaxSpeedDuration <= 0 {
 		opts.MaxSpeedDuration = DefaultOptions().MaxSpeedDuration
 	}
