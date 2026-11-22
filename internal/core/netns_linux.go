@@ -4,6 +4,7 @@ package core
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -332,22 +333,67 @@ func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string
 		return nil, "", "", fmt.Errorf("inspect existing IPv4 routes before allocating the namespace link: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	used := parseRouteNetworks(string(out))
-	mask := net.CIDRMask(30, 32)
-	start := pid % 16384
-	for offset := 0; offset < 16384; offset++ {
-		index := (start + offset) % 16384
-		base := net.IPv4(10, 254, byte(index/64), byte((index%64)*4)).To4()
-		candidate := &net.IPNet{IP: base, Mask: mask}
-		if overlapsAnyRoute(candidate, used) {
+	// Try multiple non-public address pools. VPN clients commonly install a
+	// broad 10.0.0.0/8 route, so relying on one hard-coded 10.254.0.0/16 block
+	// makes an otherwise healthy machine appear to have no free subnet.
+	for _, poolCIDR := range []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+		"198.18.0.0/15",
+	} {
+		_, pool, parseErr := net.ParseCIDR(poolCIDR)
+		if parseErr != nil {
 			continue
 		}
-		host := append(net.IP(nil), base...)
-		host[3]++
-		proxy := append(net.IP(nil), base...)
-		proxy[3] += 2
-		return candidate, host.String(), proxy.String(), nil
+		if networkFullyCoveredByRoute(pool, used) {
+			continue
+		}
+		ones, bits := pool.Mask.Size()
+		if bits != 32 || ones > 28 {
+			continue
+		}
+		candidateCount := 1 << uint(bits-ones-2)
+		start := pid % candidateCount
+		poolBase := binary.BigEndian.Uint32(pool.IP.To4())
+		for offset := 0; offset < candidateCount; offset++ {
+			index := (start + offset) % candidateCount
+			base := make(net.IP, net.IPv4len)
+			binary.BigEndian.PutUint32(base, poolBase+uint32(index*4))
+			candidate := &net.IPNet{IP: base, Mask: net.CIDRMask(30, 32)}
+			if overlapsAnyRoute(candidate, used) {
+				continue
+			}
+			host := append(net.IP(nil), base...)
+			host[3]++
+			proxy := append(net.IP(nil), base...)
+			proxy[3] += 2
+			return candidate, host.String(), proxy.String(), nil
+		}
 	}
-	return nil, "", "", fmt.Errorf("no unused /30 subnet is available in the SubWatch private address pool 10.254.0.0/16")
+	return nil, "", "", fmt.Errorf("no unused /30 subnet found in private/shared/benchmark address pools (10/8, 172.16/12, 192.168/16, 100.64/10, 198.18/15); existing routes cover all candidates")
+}
+
+// networkFullyCoveredByRoute avoids scanning millions of addresses when an
+// existing broad VPN route (for example 10.0.0.0/8) covers an entire pool.
+func networkFullyCoveredByRoute(pool *net.IPNet, routes []*net.IPNet) bool {
+	if pool == nil {
+		return true
+	}
+	last := append(net.IP(nil), pool.IP.To4()...)
+	if len(last) != net.IPv4len {
+		return true
+	}
+	for i := len(last) - 1; i >= 0; i-- {
+		last[i] |= ^pool.Mask[i]
+	}
+	for _, route := range routes {
+		if route.Contains(pool.IP) && route.Contains(last) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseRouteNetworks(routes string) []*net.IPNet {
