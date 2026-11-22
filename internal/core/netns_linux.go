@@ -258,7 +258,8 @@ func namespaceRouteLookupArgs(proxyIP string) []string {
 }
 
 func (n *NetworkNamespace) verifyEgressRoute(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, namespaceRouteLookupArgs(n.ProxyIP)...)
+	args := namespaceRouteLookupArgs(n.ProxyIP)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("verify selected-interface routing: %w: %s\n%s", err, strings.TrimSpace(string(out)), n.routeDiagnostics(ctx))
