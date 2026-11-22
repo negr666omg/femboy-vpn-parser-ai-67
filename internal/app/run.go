@@ -114,7 +114,7 @@ type sourceQualityTotals struct {
 const (
 	stabilityNameSuffix       = " 🧱"
 	stableURLLatencyLimitMS   = int64(100)
-	stableConsecutiveCycles   = 2
+	stableConsecutiveCycles   = 3
 )
 
 // StabilityTracker keeps consecutive fast URL-test results across complete
@@ -2195,22 +2195,36 @@ func markGeminiNodes(nodes []sub.Node) error {
 	return nil
 }
 
-func stabilityMarkedName(name string, stable bool) string {
+const gamingNameSuffix = " 🎮"
+
+// qualityMarkedName keeps quality markers mutually exclusive. A gaming marker
+// always takes precedence over the less-specific stability marker.
+func qualityMarkedName(name string, stable, gaming bool) string {
 	name = strings.TrimSpace(name)
 	hasGemini := strings.HasSuffix(name, geminiNameSuffix)
 	if hasGemini {
 		name = strings.TrimSpace(strings.TrimSuffix(name, geminiNameSuffix))
 	}
-	for strings.HasSuffix(name, stabilityNameSuffix) {
-		name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
+	hasGaming := false
+	for {
+		switch {
+		case strings.HasSuffix(name, gamingNameSuffix):
+			hasGaming = true
+			name = strings.TrimSpace(strings.TrimSuffix(name, gamingNameSuffix))
+		case strings.HasSuffix(name, stabilityNameSuffix):
+			name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
+		default:
+			if gaming || hasGaming {
+				name += gamingNameSuffix
+			} else if stable {
+				name += stabilityNameSuffix
+			}
+			if hasGemini {
+				name += geminiNameSuffix
+			}
+			return name
+		}
 	}
-	if stable {
-		name += stabilityNameSuffix
-	}
-	if hasGemini {
-		name += geminiNameSuffix
-	}
-	return name
 }
 
 func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int) error {
