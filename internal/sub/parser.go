@@ -36,15 +36,6 @@ type Node struct {
 	CloudflareDownloadMbps float64 `json:"cloudflare_download_mbps,omitempty"`
 	CloudflareUploadMbps float64 `json:"cloudflare_upload_mbps,omitempty"`
 	CloudflareError string       `json:"cloudflare_error,omitempty"`
-	GamingTested bool             `json:"gaming_tested,omitempty"`
-	GamingPassed bool             `json:"gaming_passed,omitempty"`
-	GamingLatencyMS float64       `json:"gaming_latency_ms,omitempty"`
-	GamingJitterMS float64        `json:"gaming_jitter_ms,omitempty"`
-	GamingDownloadLoadedLatencyMS float64 `json:"gaming_download_loaded_latency_ms,omitempty"`
-	GamingDownloadLoadedJitterMS float64  `json:"gaming_download_loaded_jitter_ms,omitempty"`
-	GamingUploadLoadedLatencyMS float64   `json:"gaming_upload_loaded_latency_ms,omitempty"`
-	GamingUploadLoadedJitterMS float64    `json:"gaming_upload_loaded_jitter_ms,omitempty"`
-	GamingError string             `json:"gaming_error,omitempty"`
 	GeminiStatus string          `json:"gemini_status,omitempty"`
 	GeminiNote   string          `json:"gemini_note,omitempty"`
 	GeminiRegion string          `json:"gemini_region,omitempty"`
