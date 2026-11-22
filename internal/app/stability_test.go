@@ -10,7 +10,7 @@ import (
 	"github.com/negr666omg/subwatch/internal/sub"
 )
 
-func TestStabilityTrackerRequiresTwoConsecutiveFastURLChecks(t *testing.T) {
+func TestStabilityTrackerRequiresThreeConsecutiveFastURLChecks(t *testing.T) {
 	tracker := NewStabilityTracker()
 	node := sub.Node{Key: "node-a", URLPassed: true, URLLatencyMS: 99}
 
@@ -32,8 +32,9 @@ func TestStabilityTrackerResetsOnFailureSlowPingOrMissingNode(t *testing.T) {
 	slow := sub.Node{Key: "node-a", URLPassed: true, URLLatencyMS: 100}
 
 	tracker.recordCycle([]sub.Node{fast})
-	if got := tracker.recordCycle([]sub.Node{fast})["node-a"]; got != 2 {
-		t.Fatalf("expected stable streak before reset, got %d", got)
+	tracker.recordCycle([]sub.Node{fast})
+	if got := tracker.recordCycle([]sub.Node{fast})["node-a"]; got != 3 {
+		t.Fatalf("expected three-cycle stable streak before reset, got %d", got)
 	}
 	if got := tracker.recordCycle([]sub.Node{failed})["node-a"]; got != 0 {
 		t.Fatalf("failed URL check streak = %d, want 0", got)
@@ -55,6 +56,27 @@ func TestStabilityTrackerResetsOnFailureSlowPingOrMissingNode(t *testing.T) {
 	}
 }
 
+func TestQualityMarkersAreExclusiveAndGamingTakesPriority(t *testing.T) {
+	const base = "🇩🇪 Germany 29↓42↑"
+	cases := []struct {
+		name string
+		stable bool
+		gaming bool
+		want string
+	}{
+		{name: base, stable: true, want: base + stabilityNameSuffix},
+		{name: base, stable: true, gaming: true, want: base + gamingNameSuffix},
+		{name: base + stabilityNameSuffix, stable: true, gaming: true, want: base + gamingNameSuffix},
+		{name: base + gamingNameSuffix + stabilityNameSuffix, stable: true, want: base + gamingNameSuffix},
+		{name: base + gamingNameSuffix + geminiNameSuffix, stable: true, want: base + gamingNameSuffix + geminiNameSuffix},
+	}
+	for _, tc := range cases {
+		if got := qualityMarkedName(tc.name, tc.stable, tc.gaming); got != tc.want {
+			t.Errorf("qualityMarkedName(%q, %v, %v) = %q, want %q", tc.name, tc.stable, tc.gaming, got, tc.want)
+		}
+	}
+}
+
 func TestStabilityMarkerIsPlacedBeforeGeminiAndRemovedWhenUnstable(t *testing.T) {
 	const base = "🇩🇪 Germany 29↓42↑"
 	cases := []struct {
@@ -69,8 +91,8 @@ func TestStabilityMarkerIsPlacedBeforeGeminiAndRemovedWhenUnstable(t *testing.T)
 		{name: base + " 🧱 🧱", stable: true, want: base + " 🧱"},
 	}
 	for _, tc := range cases {
-		if got := stabilityMarkedName(tc.name, tc.stable); got != tc.want {
-			t.Errorf("stabilityMarkedName(%q, %v) = %q, want %q", tc.name, tc.stable, got, tc.want)
+		if got := qualityMarkedName(tc.name, tc.stable, false); got != tc.want {
+			t.Errorf("qualityMarkedName(%q, %v, false) = %q, want %q", tc.name, tc.stable, got, tc.want)
 		}
 	}
 }
@@ -86,7 +108,7 @@ func TestWriteStabilityResultsUpdatesAllSubscriptionLists(t *testing.T) {
 	speedPassed := []sub.Node{node}
 	gemini := []sub.Node{node}
 
-	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{"node-a": 2}); err != nil {
+	if err := writeStabilityResults(dir, all, urlPassed, speedPassed, gemini, map[string]int{"node-a": 3}); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt"} {
