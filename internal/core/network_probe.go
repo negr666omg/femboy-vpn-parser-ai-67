@@ -193,11 +193,12 @@ func RunNetworkTCPProbe(rawTargets string, timeout time.Duration, output io.Writ
 			}
 		}()
 	}
+schedule:
 	for i := range targets {
 		select {
 		case jobs <- i:
 		case <-ctx.Done():
-			break
+			break schedule
 		}
 	}
 	close(jobs)
