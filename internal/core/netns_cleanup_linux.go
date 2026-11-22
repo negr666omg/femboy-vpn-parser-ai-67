@@ -93,7 +93,7 @@ func CleanupNetworkIsolation(output io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("list IPv4 policy rules: %w", err)
 	}
-	for _, line := range strings.Split(rulesOut, "\\n") {
+	for _, line := range strings.Split(rulesOut, "\n") {
 		fields := strings.Fields(line)
 		for i := 0; i+1 < len(fields); i++ {
 			if fields[i] == "iif" {
@@ -105,7 +105,7 @@ func CleanupNetworkIsolation(output io.Writer) error {
 	}
 	if _, lookErr := exec.LookPath("iptables"); lookErr == nil {
 		if filterOut, filterErr := runCleanupRoot("iptables", "-S", "FORWARD"); filterErr == nil {
-			for _, line := range strings.Split(filterOut, "\\n") {
+			for _, line := range strings.Split(filterOut, "\n") {
 				fields := strings.Fields(line)
 				for i := 0; i+1 < len(fields); i++ {
 					if fields[i] == "-i" || fields[i] == "-o" {
@@ -173,6 +173,7 @@ func CleanupNetworkIsolation(output io.Writer) error {
 			removed += cleanupIPTablesRules(hostVeth, proxyCIDR, output)
 		}
 
+		flushedTables := make(map[string]bool)
 		for _, rule := range strings.Split(rulesOut, "\n") {
 			fields := strings.Fields(rule)
 			if len(fields) < 2 || !strings.HasSuffix(fields[0], ":") {
@@ -182,27 +183,56 @@ func CleanupNetworkIsolation(output io.Writer) error {
 			if _, parseErr := strconv.Atoi(pref); parseErr != nil {
 				continue
 			}
+
+			// New versions select egress by the namespace source IP. Keep
+			// compatibility with the older ingress-interface selector too.
+			var selector []string
 			for i := 0; i+1 < len(fields); i++ {
-				if fields[i] == "iif" && fields[i+1] == hostVeth {
-					for j := i + 2; j+1 < len(fields); j++ {
-						if fields[j] == "lookup" {
-							table := fields[j+1]
-							if _, tableErr := strconv.Atoi(table); tableErr == nil {
-								if _, delErr := runCleanupRoot("ip", "-4", "rule", "del", "pref", pref, "iif", hostVeth, "lookup", table); delErr == nil {
-									fmt.Fprintf(output, "[cleanup] removed policy rule for %s (table %s)\n", hostVeth, table)
-									removed++
-								}
-								if _, flushErr := runCleanupRoot("ip", "-4", "route", "flush", "table", table); flushErr == nil {
-									fmt.Fprintf(output, "[cleanup] flushed SubWatch route table %s\n", table)
-									removed++
-								}
-							}
-							break
-						}
+				switch fields[i] {
+				case "iif":
+					if fields[i+1] == hostVeth {
+						selector = []string{"iif", hostVeth}
 					}
-					break
+				case "from":
+					proxyIP := strings.TrimSuffix(proxyCIDR, "/32")
+					if proxyCIDR != "" && (fields[i+1] == proxyCIDR || fields[i+1] == proxyIP) {
+						selector = []string{"from", proxyCIDR}
+					}
 				}
+				if len(selector) == 0 {
+					continue
+				}
+
+				table := ""
+				for j := i + 2; j+1 < len(fields); j++ {
+					if fields[j] == "lookup" {
+						table = fields[j+1]
+						break
+					}
+				}
+				if table == "" {
+					continue
+				}
+				if _, tableErr := strconv.Atoi(table); tableErr != nil {
+					continue
+				}
+				args := []string{"ip", "-4", "rule", "del", "pref", pref}
+				args = append(args, selector...)
+				args = append(args, "lookup", table)
+				if _, delErr := runCleanupRoot(args...); delErr == nil {
+					fmt.Fprintf(output, "[cleanup] removed policy rule for %s (table %s)\n", hostVeth, table)
+					removed++
+				}
+				if !flushedTables[table] {
+					if _, flushErr := runCleanupRoot("ip", "-4", "route", "flush", "table", table); flushErr == nil {
+						fmt.Fprintf(output, "[cleanup] flushed SubWatch route table %s\n", table)
+						removed++
+					}
+					flushedTables[table] = true
+				}
+				break
 			}
+
 			if returnSubnet != "" && strings.Contains(rule, "to "+returnSubnet+" ") && strings.Contains(rule, "lookup main") {
 				if _, delErr := runCleanupRoot("ip", "-4", "rule", "del", "pref", pref, "to", returnSubnet, "lookup", "main"); delErr == nil {
 					fmt.Fprintf(output, "[cleanup] removed return-route rule for %s\n", returnSubnet)
