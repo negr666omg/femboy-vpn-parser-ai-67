@@ -399,6 +399,14 @@ func networkFullyCoveredByRoute(pool *net.IPNet, routes []*net.IPNet) bool {
 		last[i] |= ^pool.Mask[i]
 	}
 	for _, route := range routes {
+		ones, bits := route.Mask.Size()
+		// Ignore catch-all and split-default routes (0/0, 0/1, 128/1).
+		// They describe the host's normal egress path, not an occupied
+		// connected subnet: our /30 veth route is more specific and is
+		// explicitly selected by the destination policy rule.
+		if bits != 32 || ones <= 1 {
+			continue
+		}
 		if route.Contains(first) && route.Contains(last) {
 			return true
 		}
@@ -426,6 +434,12 @@ func parseRouteNetworks(routes string) []*net.IPNet {
 
 func overlapsAnyRoute(candidate *net.IPNet, routes []*net.IPNet) bool {
 	for _, route := range routes {
+		ones, bits := route.Mask.Size()
+		// Broad default/split-default routes are not connected address
+		// allocations. A more-specific connected veth route wins over them.
+		if bits != 32 || ones <= 1 {
+			continue
+		}
 		if route.Contains(candidate.IP) || candidate.Contains(route.IP) {
 			return true
 		}
