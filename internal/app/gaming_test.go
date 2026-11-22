@@ -1,12 +1,14 @@
 package app
 
 import (
+	"encoding/csv"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/negr666omg/subwatch/internal/check"
+	"github.com/negr666omg/subwatch/internal/sub"
 )
 
 func TestGamingQualityDecisionChecksIdleAndBothLoadedDirections(t *testing.T) {
@@ -33,6 +35,43 @@ func TestGamingQualityDecisionChecksIdleAndBothLoadedDirections(t *testing.T) {
 	badJitter.DownloadLoadedJitterMS = 25
 	if passed, reason := gamingQualityDecision(badJitter, limits); passed || !strings.Contains(reason, "download-loaded jitter") {
 		t.Fatalf("bad loaded jitter decision = (%v, %q), want a rejection", passed, reason)
+	}
+}
+
+func TestWriteGamingQualityReportMarksPacketLossUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	nodes := []sub.Node{
+		{
+			Name: "🇩🇪 Germany", Protocol: "vless", GamingTested: true, GamingPassed: true,
+			GamingLatencyMS: 30, GamingJitterMS: 4,
+			GamingDownloadLoadedLatencyMS: 48, GamingDownloadLoadedJitterMS: 7,
+			GamingUploadLoadedLatencyMS: 55, GamingUploadLoadedJitterMS: 8,
+		},
+		{
+			Name: "🇫🇷 France", Protocol: "trojan", GamingTested: true,
+			GamingLatencyMS: 90, GamingJitterMS: 30, GamingError: "latency threshold exceeded",
+		},
+	}
+	if err := writeGamingQualityReport(dir, nodes); err != nil {
+		t.Fatalf("writeGamingQualityReport() error = %v", err)
+	}
+	file, err := os.Open(filepath.Join(dir, "gaming-quality.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	rows, err := csv.NewReader(file).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("CSV row count = %d, want header + 2 nodes", len(rows))
+	}
+	if rows[1][0] != "🇩🇪 Germany 🎮" || rows[1][3] != "true" || rows[1][10] != "not_measured" {
+		t.Fatalf("unexpected passing row: %#v", rows[1])
+	}
+	if rows[2][3] != "false" || rows[2][10] != "not_measured" || rows[2][11] != "latency threshold exceeded" {
+		t.Fatalf("unexpected failed row: %#v", rows[2])
 	}
 }
 
