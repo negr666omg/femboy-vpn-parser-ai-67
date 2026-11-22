@@ -74,6 +74,31 @@ func TestParseRouteNetworksAndOverlap(t *testing.T) {
 	}
 }
 
+func TestParseRouteNetworksUsesOnlyDestinationField(t *testing.T) {
+	routes := strings.Join([]string{
+		"default via 192.168.1.75 dev enp1s0 src 192.168.1.87",
+		"0.0.0.0/1 dev tun0",
+		"128.0.0.0/1 dev tun0",
+		"192.168.1.0/24 dev enp1s0 src 192.168.1.87",
+		"local 192.168.1.87 dev enp1s0 table local",
+		"broadcast 192.168.1.255 dev enp1s0 table local",
+	}, "\n")
+	parsed := parseRouteNetworks(routes)
+	if len(parsed) != 4 {
+		t.Fatalf("parsed %d destination routes, want 4: %#v", len(parsed), parsed)
+	}
+	for _, route := range parsed {
+		if route.Contains(net.ParseIP("192.168.1.75")) && route.String() == "192.168.1.75/32" {
+			t.Fatal("default route gateway was incorrectly treated as a reserved destination")
+		}
+		if route.Contains(net.ParseIP("192.168.1.87")) && route.String() == "192.168.1.87/32" {
+			// This address is valid because it is explicitly the destination
+			// of the "local" route, not merely the source address of default.
+			continue
+		}
+	}
+}
+
 func TestNetworkFullyCoveredByRoute(t *testing.T) {
 	_, whole, err := net.ParseCIDR("10.0.0.0/16")
 	if err != nil {
