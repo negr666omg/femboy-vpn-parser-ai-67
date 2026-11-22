@@ -1891,6 +1891,82 @@ func runSpeedTestWithProviderProgress(parent context.Context, n sub.Node, opts O
 }
 
 
+func gamingQualityDecision(q check.NetworkQuality, limits GamingQualityOptions) (bool, string) {
+	var failures []string
+	if q.LatencyMS > limits.MaxLatencyMS {
+		failures = append(failures, fmt.Sprintf("latency %.1f ms > %.1f ms", q.LatencyMS, limits.MaxLatencyMS))
+	}
+	if q.JitterMS > limits.MaxJitterMS {
+		failures = append(failures, fmt.Sprintf("jitter %.1f ms > %.1f ms", q.JitterMS, limits.MaxJitterMS))
+	}
+	if q.DownloadLoadedLatencyMS > limits.MaxLoadedLatencyMS {
+		failures = append(failures, fmt.Sprintf("download-loaded latency %.1f ms > %.1f ms", q.DownloadLoadedLatencyMS, limits.MaxLoadedLatencyMS))
+	}
+	if q.UploadLoadedLatencyMS > limits.MaxLoadedLatencyMS {
+		failures = append(failures, fmt.Sprintf("upload-loaded latency %.1f ms > %.1f ms", q.UploadLoadedLatencyMS, limits.MaxLoadedLatencyMS))
+	}
+	if q.DownloadLoadedJitterMS > limits.MaxLoadedJitterMS {
+		failures = append(failures, fmt.Sprintf("download-loaded jitter %.1f ms > %.1f ms", q.DownloadLoadedJitterMS, limits.MaxLoadedJitterMS))
+	}
+	if q.UploadLoadedJitterMS > limits.MaxLoadedJitterMS {
+		failures = append(failures, fmt.Sprintf("upload-loaded jitter %.1f ms > %.1f ms", q.UploadLoadedJitterMS, limits.MaxLoadedJitterMS))
+	}
+	return len(failures) == 0, strings.Join(failures, "; ")
+}
+
+func gamingQualityLiveDetail(q check.NetworkQuality, passed bool, reason string) string {
+	status := "CANDIDATE 🎮"
+	if !passed {
+		status = "NO MARK"
+	}
+	detail := fmt.Sprintf(
+		"Gaming %s | idle %.1f/%.1f ms | loaded↓ %.1f/%.1f ms | loaded↑ %.1f/%.1f ms | packet loss: n/a",
+		status, q.LatencyMS, q.JitterMS,
+		q.DownloadLoadedLatencyMS, q.DownloadLoadedJitterMS,
+		q.UploadLoadedLatencyMS, q.UploadLoadedJitterMS,
+	)
+	if reason != "" {
+		detail += " | " + reason
+	}
+	return detail
+}
+
+func writeGamingQualityReport(dir string, nodes []sub.Node) error {
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	if err := writer.Write([]string{
+		"name", "protocol", "tested", "gaming_candidate",
+		"latency_ms", "jitter_ms",
+		"download_loaded_latency_ms", "download_loaded_jitter_ms",
+		"upload_loaded_latency_ms", "upload_loaded_jitter_ms",
+		"packet_loss", "result",
+	}); err != nil {
+		return err
+	}
+	for _, n := range nodes {
+		row := []string{
+			n.Name, protocolOf(n),
+			strconv.FormatBool(n.GamingTested),
+			strconv.FormatBool(n.GamingPassed),
+			strconv.FormatFloat(n.GamingLatencyMS, 'f', 2, 64),
+			strconv.FormatFloat(n.GamingJitterMS, 'f', 2, 64),
+			strconv.FormatFloat(n.GamingDownloadLoadedLatencyMS, 'f', 2, 64),
+			strconv.FormatFloat(n.GamingDownloadLoadedJitterMS, 'f', 2, 64),
+			strconv.FormatFloat(n.GamingUploadLoadedLatencyMS, 'f', 2, 64),
+			strconv.FormatFloat(n.GamingUploadLoadedJitterMS, 'f', 2, 64),
+			"not_measured", n.GamingError,
+		}
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(dir, "gaming-quality.csv"), buffer.Bytes())
+}
+
 func urlStageNodeName(country string) string {
 	return urlStageNodeNameWithFormat(country, "full")
 }
