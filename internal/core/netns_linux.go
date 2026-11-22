@@ -2,8 +2,6 @@
 
 package core
 
-const namespacePolicyPriority = 0
-
 import (
 	"context"
 	"encoding/binary"
@@ -20,6 +18,8 @@ import (
 	"syscall"
 	"time"
 )
+
+const namespacePolicyPriority = 0
 
 // NetworkNamespace provides an isolated network stack. A private veth pair
 // connects it to the host; policy routing and temporary NAT rules make packets
