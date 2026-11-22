@@ -111,7 +111,6 @@ type sourceQualityTotals struct {
 	SharedGemini         int
 }
 
-
 const (
 	stabilityNameSuffix       = " 🧱"
 	stableURLLatencyLimitMS   = int64(100)
@@ -2202,7 +2201,9 @@ func stabilityMarkedName(name string, stable bool) string {
 	if hasGemini {
 		name = strings.TrimSpace(strings.TrimSuffix(name, geminiNameSuffix))
 	}
-	name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
+	for strings.HasSuffix(name, stabilityNameSuffix) {
+		name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
+	}
 	if stable {
 		name += stabilityNameSuffix
 	}
