@@ -331,8 +331,8 @@ func cloudflareBytesURL(raw string, numBytes int64) (string, error) {
 	return u.String(), nil
 }
 
-var cloudflareRequestDuration = regexp.MustCompile(`(?i)(?:^|,\\s*)cfReq(?:uest)?Dur(?:ation)?;\\s*dur=([0-9.]+)`)
-var cloudflareSpeedDuration = regexp.MustCompile(`(?i)(?:^|,\\s*)cfSpeed[a-zA-Z]*;\\s*dur=([0-9.]+)`)
+var cloudflareRequestDuration = regexp.MustCompile(`(?i)(?:^|,\s*)cfReq(?:uest)?Dur(?:ation)?;\s*dur=([0-9.]+)`)
+var cloudflareSpeedDuration = regexp.MustCompile(`(?i)(?:^|,\\s*)cfSpeed[a-zA-Z]*;\s*dur=([0-9.]+)`)
 
 func cloudflareServerDuration(header string) float64 {
 	if match := cloudflareRequestDuration.FindStringSubmatch(header); len(match) == 2 {
