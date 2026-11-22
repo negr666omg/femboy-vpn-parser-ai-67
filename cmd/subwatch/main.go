@@ -17,7 +17,7 @@ import (
 	"github.com/negr666omg/subwatch/internal/app"
 )
 
-const version = "0.3.9"
+const version = "0.4.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -224,5 +224,26 @@ func runCommand(args []string) error {
 		if !continuous {
 			return nil
 		}
+		if opts.CycleInterval > 0 {
+			fmt.Fprintf(os.Stdout, "\n[loop] waiting %s before next cycle (Ctrl+C to stop)\n", opts.CycleInterval)
+		}
+		if !waitForNextCycle(ctx, opts.CycleInterval) {
+			fmt.Fprintln(os.Stdout, "\n[stop] Interrupted; exiting cleanly")
+			return nil
+		}
+	}
+}
+
+func waitForNextCycle(ctx context.Context, interval time.Duration) bool {
+	if interval <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
 	}
 }
