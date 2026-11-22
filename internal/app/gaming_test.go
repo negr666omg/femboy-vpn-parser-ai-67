@@ -53,7 +53,7 @@ func TestLoadOptionsEnablesExperimentalGamingQuality(t *testing.T) {
 	if opts.GamingQuality.LatencySamples != 12 || opts.GamingQuality.Concurrency != 1 {
 		t.Fatalf("unexpected gaming test defaults: %+v", opts.GamingQuality)
 	}
-	if opts.GamingQuality.DownloadBytes != 32<<20 || opts.GamingQuality.UploadBytes != 16<<20 {
+	if opts.GamingQuality.DownloadBytes != 16<<20 || opts.GamingQuality.UploadBytes != 16<<20 {
 		t.Fatalf("unexpected gaming payload defaults: %d/%d", opts.GamingQuality.DownloadBytes, opts.GamingQuality.UploadBytes)
 	}
 }
