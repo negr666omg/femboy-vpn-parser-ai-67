@@ -36,6 +36,7 @@ type NetworkNamespace struct {
 	firewallTable    string
 	firewallBackend  string
 	physicalInterface string
+	gateway           string
 	resolvDir        string
 
 	namespaceCreated  bool
@@ -132,6 +133,7 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 		routeTable:        tableID,
 		firewallTable:     "subwatch" + id,
 		physicalInterface: it.Name,
+		gateway:           gateway,
 		resolvDir:         filepath.Join("/etc/netns", "sw-"+id),
 	}
 	peer := "swn" + id
@@ -192,39 +194,18 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 		return fail(fmt.Errorf("configure namespace default route: %w", err))
 	}
 
-	// Keep reply traffic to the namespace on the connected main-table route,
-	// even when a host VPN installs higher-priority policy rules. Packets
-	// arriving from this veth use a dedicated table whose default route points
-	// directly at the requested host interface, before VPN rules are evaluated.
-	fmt.Fprintf(output, "[network] installing policy route via %s (gateway %s)\n", it.Name, gateway)
-	if err := run("ip", "-4", "route", "add", interfacePrefix, "dev", it.Name, "scope", "link", "src", interfaceIP.String(), "table", strconv.Itoa(ns.routeTable)); err != nil {
-		return fail(fmt.Errorf("add connected route for %s to isolated routing table: %w", it.Name, err))
-	}
-	ns.routeTableCreated = true
-	_, selectedPrefix, _ := net.ParseCIDR(interfacePrefix)
-	if gateway != "" && (selectedPrefix == nil || !selectedPrefix.Contains(net.ParseIP(gateway))) {
-		if err := run("ip", "-4", "route", "add", gateway+"/32", "dev", it.Name, "scope", "link", "table", strconv.Itoa(ns.routeTable)); err != nil {
-			return fail(fmt.Errorf("add off-link gateway route %s through %s: %w", gateway, it.Name, err))
-		}
-	}
-	defaultRoute := []string{"ip", "-4", "route", "add", "default"}
-	if gateway != "" {
-		defaultRoute = append(defaultRoute, "via", gateway)
-	}
-	defaultRoute = append(defaultRoute, "dev", it.Name, "table", strconv.Itoa(ns.routeTable))
-	if err := run(defaultRoute...); err != nil {
-		return fail(fmt.Errorf("add isolated default route through %s: %w", it.Name, err))
-	}
-	// Priority 0 places both narrowly scoped rules immediately after the
-	// kernel's mandatory local-table rule and before VPN catch-all rules.
-	// A later priority (such as 2) can silently lose to a VPN rule at pref 1.
-	priority := strconv.Itoa(namespacePolicyPriority)
-	if err := run("ip", "-4", "rule", "add", "pref", priority, "to", ns.subnet, "lookup", "main"); err != nil {
+	// Keep reply packets addressed to the namespace on the main-table veth
+	// route. Select the physical egress table by the namespace's unique source
+	// address: forwarded packets retain ProxyIP until postrouting SNAT. This
+	// avoids an ingress-interface route lookup, which can fail source
+	// validation on hosts with strict reverse-path filtering.
+	// Priority 0 places these narrow rules before VPN catch-all rules.
+	if err := run("ip", "-4", "rule", "add", "pref", strconv.Itoa(namespacePolicyPriority), "to", ns.subnet, "lookup", "main"); err != nil {
 		return fail(fmt.Errorf("add return route policy rule: %w", err))
 	}
 	ns.returnRuleCreated = true
-	if err := run("ip", "-4", "rule", "add", "pref", priority, "iif", ns.hostVeth, "lookup", strconv.Itoa(ns.routeTable)); err != nil {
-		return fail(fmt.Errorf("add selected-interface policy rule: %w", err))
+	if err := run(namespaceEgressRuleArgs("add", ns.ProxyIP, ns.routeTable)...); err != nil {
+		return fail(fmt.Errorf("add selected-interface source policy rule: %w", err))
 	}
 	ns.egressRuleCreated = true
 	if err := ns.verifyEgressRoute(ctx); err != nil {
@@ -243,8 +224,21 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	return ns, nil
 }
 
+func namespaceEgressRuleArgs(operation, proxyIP string, routeTable int) []string {
+	return []string{
+		"ip", "-4", "rule", operation,
+		"pref", strconv.Itoa(namespacePolicyPriority),
+		"from", proxyIP + "/32",
+		"lookup", strconv.Itoa(routeTable),
+	}
+}
+
+func namespaceRouteLookupArgs(proxyIP string) []string {
+	return []string{"-4", "route", "get", "1.1.1.1", "from", proxyIP}
+}
+
 func (n *NetworkNamespace) verifyEgressRoute(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "ip", "-4", "route", "get", "1.1.1.1", "from", n.ProxyIP, "iif", n.hostVeth)
+	cmd := exec.CommandContext(ctx, "ip", namespaceRouteLookupArgs(n.ProxyIP)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("verify selected-interface routing: %w: %s\n%s", err, strings.TrimSpace(string(out)), n.routeDiagnostics(ctx))
@@ -265,8 +259,10 @@ func (n *NetworkNamespace) routeDiagnostics(ctx context.Context) string {
 		{"ip", "-4", "route", "show", "table", strconv.Itoa(n.routeTable)},
 		{"ip", "-o", "link", "show", "dev", n.hostVeth},
 		{"ip", "-4", "addr", "show", "dev", n.hostVeth},
-		{"ip", "-4", "route", "get", "192.168.1.75", "from", n.ProxyIP, "iif", n.hostVeth},
-		{"ip", "-4", "route", "get", "1.1.1.1", "from", n.ProxyIP},
+		namespaceRouteLookupArgs(n.ProxyIP),
+	}
+	if n.gateway != "" {
+		checks = append(checks, []string{"ip", "-4", "route", "get", n.gateway, "from", n.ProxyIP})
 	}
 	var result strings.Builder
 	for _, args := range checks {
@@ -913,7 +909,7 @@ func (n *NetworkNamespace) Close() {
 		}
 	}
 	if n.egressRuleCreated {
-		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", strconv.Itoa(namespacePolicyPriority), "iif", n.hostVeth, "lookup", strconv.Itoa(n.routeTable))
+		_ = n.root(ctx, namespaceEgressRuleArgs("del", n.ProxyIP, n.routeTable)...)
 	}
 	if n.returnRuleCreated {
 		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", strconv.Itoa(namespacePolicyPriority), "to", n.subnet, "lookup", "main")
