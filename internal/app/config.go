@@ -16,6 +16,7 @@ type Options struct {
 	OutDir             string
 	GeminiFile         bool
 	Interface          string
+	CycleInterval      time.Duration
 	IsolateSourceDownloads bool
 	NetworkNamespace   string
 	NetworkNamespaceInterface string
@@ -67,6 +68,9 @@ type fileConfig struct {
 		Interface              string `json:"interface"`
 		IsolateSourceDownloads bool   `json:"isolate_source_downloads"`
 	} `json:"network"`
+	Loop struct {
+		Interval string `json:"interval"`
+	} `json:"loop"`
 	Sources struct {
 		File    string `json:"file"`
 		Timeout string `json:"timeout"`
@@ -165,6 +169,13 @@ func LoadOptions(path string) (Options, error) {
 		opts.Interface = cfg.Network.Interface
 	}
 	opts.IsolateSourceDownloads = cfg.Network.IsolateSourceDownloads
+	if cfg.Loop.Interval != "" {
+		d, e := time.ParseDuration(strings.TrimSpace(cfg.Loop.Interval))
+		if e != nil || d < 0 {
+			return opts, fmt.Errorf("loop.interval must be a non-negative duration: %q", cfg.Loop.Interval)
+		}
+		opts.CycleInterval = d
+	}
 	if cfg.Sources.File != "" {
 		opts.Sources = cfg.Sources.File
 	}
@@ -384,6 +395,9 @@ func ExampleConfig() string {
   "network": {
     "interface": "auto",
     "isolate_source_downloads": false
+  },
+  "loop": {
+    "interval": "0s"
   },
   "sources": {
     "file": "sources.txt",
