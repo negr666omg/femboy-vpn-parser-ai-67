@@ -83,31 +83,32 @@ type loadedSource struct {
 }
 
 type sourceQualityStats struct {
-	Reference string
-	Line int
-	Status string
-	Eligible int
-	Exclusive int
-	Shared int
-	ExclusiveURLPassed int
-	SharedURLPassed int
+	Reference  string
+	Line       int
+	ListPath   string
+	Status     string
+	Eligible   int
+	Exclusive  int
+	Shared     int
+	ExclusiveURLPassed   int
+	SharedURLPassed      int
 	ExclusiveSpeedPassed int
-	SharedSpeedPassed int
-	ExclusiveGemini int
-	SharedGemini int
+	SharedSpeedPassed    int
+	ExclusiveGemini      int
+	SharedGemini         int
 }
 
 type sourceQualityTotals struct {
-	SourceAppearances int
-	GlobalUnique int
-	SharedUnique int
-	ExclusiveUnique int
-	ExclusiveURLPassed int
-	SharedURLPassed int
+	SourceAppearances    int
+	GlobalUnique         int
+	SharedUnique         int
+	ExclusiveUnique      int
+	ExclusiveURLPassed   int
+	SharedURLPassed      int
 	ExclusiveSpeedPassed int
-	SharedSpeedPassed int
-	ExclusiveGemini int
-	SharedGemini int
+	SharedSpeedPassed    int
+	ExclusiveGemini      int
+	SharedGemini         int
 }
 
 func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) (runErr error) {
@@ -1028,6 +1029,7 @@ func buildSubscriptionSourceStats(
 		item := sourceQualityStats{
 			Reference: source.Reference,
 			Line: source.Line,
+			ListPath: source.ListPath,
 			Eligible: len(perSourceKeys[sourceIndex]),
 		}
 		switch {
@@ -1105,7 +1107,7 @@ func printSubscriptionQualitySummary(
 	)
 	fmt.Fprintln(w, "Sources ranked by new speed-passed configs (exclusive only):")
 	for rank, item := range stats {
-		label := sourceSummaryLabel(loadedSource{Reference: item.Reference, Line: item.Line})
+		label := sourceSummaryLabel(loadedSource{Reference: item.Reference, Line: item.Line, ListPath: item.ListPath})
 		status := ""
 		if item.Status != "" { status = " [" + item.Status + "]" }
 		fmt.Fprintf(w, "%2d. %s | only here %d | URL %s | speed %s | Gemini %s%s\n",
@@ -2053,9 +2055,8 @@ func cleanOutputArtifacts(dir string) error {
 
 const geminiNameSuffix = " Gemini 🐱"
 
-// writeGeminiResults exports Gemini-available nodes separately when enabled.
-// When disabled, it marks those nodes and refreshes every earlier stage list so
-// the marker is present wherever the same node appears.
+// writeGeminiResults optionally supports the legacy separate-file mode.
+// The current Run pipeline always uses inline name markers to keep output compact.
 func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes []sub.Node, separateFile bool) error {
 	if err := markGeminiNodes(geminiNodes); err != nil {
 		return err
