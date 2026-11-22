@@ -22,9 +22,20 @@ type Node struct {
 	URLError     string          `json:"url_error,omitempty"`
 	RenameError  string          `json:"rename_error,omitempty"`
 	SpeedPassed  bool            `json:"speed_passed"`
+	SpeedResultProvider string   `json:"speed_result_provider,omitempty"`
 	DownloadMbps float64         `json:"download_mbps"`
 	UploadMbps   float64         `json:"upload_mbps"`
 	SpeedError   string          `json:"speed_error,omitempty"`
+	OoklaTested bool             `json:"ookla_tested,omitempty"`
+	OoklaPassed bool             `json:"ookla_passed,omitempty"`
+	OoklaDownloadMbps float64    `json:"ookla_download_mbps,omitempty"`
+	OoklaUploadMbps float64      `json:"ookla_upload_mbps,omitempty"`
+	OoklaError string            `json:"ookla_error,omitempty"`
+	CloudflareTested bool        `json:"cloudflare_tested,omitempty"`
+	CloudflarePassed bool        `json:"cloudflare_passed,omitempty"`
+	CloudflareDownloadMbps float64 `json:"cloudflare_download_mbps,omitempty"`
+	CloudflareUploadMbps float64 `json:"cloudflare_upload_mbps,omitempty"`
+	CloudflareError string       `json:"cloudflare_error,omitempty"`
 	GeminiStatus string          `json:"gemini_status,omitempty"`
 	GeminiNote   string          `json:"gemini_note,omitempty"`
 	GeminiRegion string          `json:"gemini_region,omitempty"`
