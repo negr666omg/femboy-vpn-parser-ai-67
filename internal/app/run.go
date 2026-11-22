@@ -2230,7 +2230,7 @@ func qualityMarkedName(name string, stable, gaming bool) string {
 func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int) error {
 	for i := range nodes {
 		stable := streaks[nodeIdentity(nodes[i])] >= stableConsecutiveCycles
-		name := stabilityMarkedName(nodes[i].Name, stable)
+		name := qualityMarkedName(nodes[i].Name, stable, false)
 		if name == nodes[i].Name {
 			continue
 		}
