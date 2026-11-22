@@ -67,7 +67,7 @@ func TestQualityMarkersAreExclusiveAndGamingTakesPriority(t *testing.T) {
 		{name: base, stable: true, want: base + stabilityNameSuffix},
 		{name: base, stable: true, gaming: true, want: base + gamingNameSuffix},
 		{name: base + stabilityNameSuffix, stable: true, gaming: true, want: base + gamingNameSuffix},
-		{name: base + gamingNameSuffix + stabilityNameSuffix, stable: true, want: base + gamingNameSuffix},
+		{name: base + gamingNameSuffix + stabilityNameSuffix, stable: true, want: base + stabilityNameSuffix},
 		{name: base + gamingNameSuffix + geminiNameSuffix, stable: true, want: base + stabilityNameSuffix + geminiNameSuffix},
 		{name: base + gamingNameSuffix, want: base},
 	}
