@@ -589,6 +589,69 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		fmt.Fprintf(stdout, "Cloudflare fallback complete: %d rescued / %d tested; rescued nodes are included in speedtested.txt.\n", len(cloudflareFallbackPassed), len(fallbackResults))
 	}
 
+	// Experimental gaming checks are deliberately independent of the speed
+	// provider and fallback result: every URL-passed node gets this stage.
+	gamingPassedByKey := make(map[string]bool)
+	if opts.GamingQuality.Enabled {
+		fmt.Fprintf(stdout, "\n[3c/4] EXPERIMENTAL GAMING QUALITY: %d URL-passed nodes via Cloudflare, timeout %s\n", len(urlPassed), opts.GamingQuality.Timeout)
+		gamingResults, gamingStageErr := runStageWithLiveCallback(ctx, "GAMING QUALITY", urlPassed, opts.GamingQuality.Concurrency, stdout,
+			func(n *sub.Node) bool { return n.GamingPassed },
+			func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+				n.GamingTested = true
+				var quality check.NetworkQuality
+				testErr := withNodeClient(stageCtx, *n, opts, opts.GamingQuality.Timeout, func(nodeCtx context.Context, client *http.Client) error {
+					testCtx, cancel := context.WithTimeout(nodeCtx, opts.GamingQuality.Timeout)
+					defer cancel()
+					var qualityErr error
+					quality, qualityErr = check.CloudflareNetworkQualityTest(
+						testCtx, client,
+						"https://speed.cloudflare.com/__down?bytes={bytes}",
+						"https://speed.cloudflare.com/__up",
+						opts.GamingQuality.DownloadBytes,
+						opts.GamingQuality.UploadBytes,
+						opts.GamingQuality.LatencySamples,
+						opts.GamingQuality.SampleInterval,
+					)
+					return qualityErr
+				})
+				if testErr != nil {
+					n.GamingPassed = false
+					n.GamingError = testErr.Error()
+					live(*n, "Gaming quality: FAILED | "+shortLiveError(n.GamingError))
+					return
+				}
+				n.GamingLatencyMS = quality.LatencyMS
+				n.GamingJitterMS = quality.JitterMS
+				n.GamingDownloadLoadedLatencyMS = quality.DownloadLoadedLatencyMS
+				n.GamingDownloadLoadedJitterMS = quality.DownloadLoadedJitterMS
+				n.GamingUploadLoadedLatencyMS = quality.UploadLoadedLatencyMS
+				n.GamingUploadLoadedJitterMS = quality.UploadLoadedJitterMS
+				n.GamingPassed, n.GamingError = gamingQualityDecision(quality, opts.GamingQuality)
+				live(*n, gamingQualityLiveDetail(quality, n.GamingPassed, n.GamingError))
+			},
+			func(completed sub.Node) error {
+				if completed.GamingPassed {
+					gamingPassedByKey[nodeIdentity(completed)] = true
+				} else if completed.GamingError != "" {
+					failures.AddNode("GAMING QUALITY", completed, completed.GamingError)
+				}
+				return nil
+			},
+		)
+		if gamingStageErr != nil {
+			return gamingStageErr
+		}
+		speedResults = mergeResults(speedResults, nil, gamingResults, nil)
+		gamingPassed := filterNodes(gamingResults, func(n sub.Node) bool { return n.GamingPassed })
+		if err := writeStageFiles(opts.OutDir, "gaming-quality", gamingPassed, true); err != nil {
+			return fmt.Errorf("write gaming-quality results: %w", err)
+		}
+		if err := writeGamingQualityReport(opts.OutDir, gamingResults); err != nil {
+			return fmt.Errorf("write gaming-quality report: %w", err)
+		}
+		fmt.Fprintf(stdout, "Gaming quality complete: %d candidates / %d tested. Packet loss is not measured in this experimental HTTP-only mode.\n", len(gamingPassed), len(gamingResults))
+	}
+
 	// Speed testing may rename nodes after the URL-stage file was first written.
 	// Propagate final provider measurements and remarks by stable node identity.
 	applyNodeUpdatesByIdentity(parsed, speedResults)
@@ -690,7 +753,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 	// Stability is based only on successful URL checks under 100 ms. A node
 	// receives 🧱 from its second consecutive qualifying full cycle onward.
 	streaks := stability.recordCycle(urlResults)
-	if err := writeStabilityResults(opts.OutDir, parsed, urlPassed, speedPassed, finalNodes, streaks); err != nil {
+	if err := writeStabilityResults(opts.OutDir, parsed, urlPassed, speedPassed, finalNodes, streaks, gamingPassedByKey); err != nil {
 		return fmt.Errorf("write stability markers: %w", err)
 	}
 	stableCount := 0
@@ -2111,7 +2174,7 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 // from older versions must not survive a new run.
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
-		"all.txt", "failed.txt", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "speedtested.txt",
+		"all.txt", "failed.txt", "gaming-quality.txt", "gaming-quality.csv", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "speedtested.txt",
 		"url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
 		"speed-test-finished.txt", "speed-test-report.csv", "cloudflare-fallback-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
