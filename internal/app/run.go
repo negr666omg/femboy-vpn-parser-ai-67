@@ -699,7 +699,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		return fmt.Errorf("write stability markers: %w", err)
 	}
 	stableCount := 0
-	for key, streak := range streaks {
+	for _, streak := range streaks {
 		if streak >= stableConsecutiveCycles {
 			stableCount++
 		}
