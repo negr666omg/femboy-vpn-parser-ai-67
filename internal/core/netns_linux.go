@@ -420,17 +420,38 @@ func networkFullyCoveredByRoute(pool *net.IPNet, routes []*net.IPNet) bool {
 
 func parseRouteNetworks(routes string) []*net.IPNet {
 	var result []*net.IPNet
+	routeTypes := map[string]bool{
+		"local": true, "broadcast": true, "unicast": true,
+		"multicast": true, "blackhole": true, "unreachable": true,
+		"prohibit": true, "throw": true, "nat": true, "anycast": true,
+	}
 	for _, line := range strings.Split(routes, "\n") {
-		for _, field := range strings.Fields(line) {
-			if _, network, err := net.ParseCIDR(field); err == nil && network.IP.To4() != nil {
-				network.IP = network.IP.To4()
-				result = append(result, network)
-				break
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		destination := fields[0]
+		// iproute2 may prefix special route types before the destination:
+		// "local 192.0.2.1 dev lo table local".
+		if routeTypes[destination] {
+			if len(fields) < 2 {
+				continue
 			}
-			if ip := net.ParseIP(field); ip != nil && ip.To4() != nil {
-				result = append(result, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
-				break
-			}
+			destination = fields[1]
+		}
+		// Default and split-default routes describe egress policy, not an
+		// occupied connected address range. Never parse their gateway/src as
+		// if those addresses were the route destination.
+		if destination == "default" {
+			continue
+		}
+		if _, network, err := net.ParseCIDR(destination); err == nil && network.IP.To4() != nil {
+			network.IP = network.IP.To4()
+			result = append(result, network)
+			continue
+		}
+		if ip := net.ParseIP(destination); ip != nil && ip.To4() != nil {
+			result = append(result, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
 		}
 	}
 	return result
