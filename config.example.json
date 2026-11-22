@@ -34,6 +34,19 @@
     "download_url": "https://speed.cloudflare.com/__down?bytes={bytes}",
     "upload_url": "https://speed.cloudflare.com/__up"
   },
+  "gaming_test": {
+    "enabled": false,
+    "concurrency": 1,
+    "timeout": "90s",
+    "latency_samples": 12,
+    "sample_interval": "100ms",
+    "download_bytes": 33554432,
+    "upload_bytes": 16777216,
+    "max_latency_ms": 50,
+    "max_jitter_ms": 10,
+    "max_loaded_latency_ms": 80,
+    "max_loaded_jitter_ms": 15
+  },
   "service_check": {
     "concurrency": 4,
     "timeout": "25s",
