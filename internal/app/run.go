@@ -204,7 +204,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		opts.Interface = "auto"
 	}
 	if opts.IsolateSourceDownloads && opts.Interface == "auto" {
-		return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
+		return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a specific interface")
 	}
 	if opts.Interface != "auto" {
 		it, err := net.InterfaceByName(opts.Interface)
@@ -300,7 +300,7 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 	var sourceNamespace *core.NetworkNamespace
 	if opts.IsolateSourceDownloads {
 		if opts.Interface == "auto" {
-			return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a physical interface")
+			return fmt.Errorf("network.isolate_source_downloads requires network.interface to name a specific interface")
 		}
 		ns, nsErr := core.NewNetworkNamespace(ctx, opts.Interface, stdout)
 		if nsErr != nil {
