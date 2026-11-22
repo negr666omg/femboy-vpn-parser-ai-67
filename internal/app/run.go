@@ -111,7 +111,61 @@ type sourceQualityTotals struct {
 	SharedGemini         int
 }
 
-func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) (runErr error) {
+
+const (
+	stabilityNameSuffix       = " 🧱"
+	stableURLLatencyLimitMS   = int64(100)
+	stableConsecutiveCycles   = 2
+)
+
+// StabilityTracker keeps consecutive fast URL-test results across complete
+// runs in continuous mode. Its state intentionally lives only for one process.
+type StabilityTracker struct {
+	mu      sync.Mutex
+	streaks map[string]int
+}
+
+func NewStabilityTracker() *StabilityTracker {
+	return &StabilityTracker{streaks: make(map[string]int)}
+}
+
+func (tracker *StabilityTracker) recordCycle(results []sub.Node) map[string]int {
+	if tracker == nil {
+		tracker = NewStabilityTracker()
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+
+	next := make(map[string]int, len(results))
+	for _, node := range results {
+		key := nodeIdentity(node)
+		if key == "" {
+			continue
+		}
+		streak := 0
+		if node.URLPassed && node.URLLatencyMS >= 0 && node.URLLatencyMS < stableURLLatencyLimitMS {
+			streak = tracker.streaks[key] + 1
+		}
+		next[key] = streak
+	}
+	// Replacing the map also resets nodes that disappeared from this cycle.
+	tracker.streaks = next
+
+	snapshot := make(map[string]int, len(next))
+	for key, streak := range next {
+		snapshot[key] = streak
+	}
+	return snapshot
+}
+
+func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
+	return RunWithStability(ctx, opts, stdout, stderr, nil)
+}
+
+func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Writer, stability *StabilityTracker) (runErr error) {
+	if stability == nil {
+		stability = NewStabilityTracker()
+	}
 	if strings.TrimSpace(opts.OutDir) == "" {
 		opts.OutDir = "out"
 	}
@@ -633,6 +687,20 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) (runErr er
 	if err := writeGeminiResults(opts.OutDir, finalNodes, parsed, urlPassed, speedPassed, false); err != nil {
 		return err
 	}
+
+	// Stability is based only on successful URL checks under 100 ms. A node
+	// receives 🧱 from its second consecutive qualifying full cycle onward.
+	streaks := stability.recordCycle(urlResults)
+	if err := writeStabilityResults(opts.OutDir, parsed, urlPassed, speedPassed, finalNodes, streaks); err != nil {
+		return fmt.Errorf("write stability markers: %w", err)
+	}
+	stableCount := 0
+	for _, streak := range streaks {
+		if streak >= stableConsecutiveCycles {
+			stableCount++
+		}
+	}
+	fmt.Fprintf(stdout, "[stability] %d nodes marked 🧱 (at least %d consecutive URL checks below %d ms)\n", stableCount, stableConsecutiveCycles, stableURLLatencyLimitMS)
 
 	fmt.Fprintf(stdout, "\nFinished. Parsed: %d | unique: %d | URL passed: %d | speed passed: %d | Gemini available: %d\n", len(parsed), len(unique), len(urlPassed), len(speedPassed), len(finalNodes))
 	perSourceEligible := make([][]sub.Node, len(perSourceNodes))
@@ -2128,21 +2196,65 @@ func markGeminiNodes(nodes []sub.Node) error {
 	return nil
 }
 
+func stabilityMarkedName(name string, stable bool) string {
+	name = strings.TrimSpace(name)
+	hasGemini := strings.HasSuffix(name, geminiNameSuffix)
+	if hasGemini {
+		name = strings.TrimSpace(strings.TrimSuffix(name, geminiNameSuffix))
+	}
+	name = strings.TrimSpace(strings.TrimSuffix(name, stabilityNameSuffix))
+	if stable {
+		name += stabilityNameSuffix
+	}
+	if hasGemini {
+		name += geminiNameSuffix
+	}
+	return name
+}
+
+func applyStabilityMarkers(nodes []sub.Node, streaks map[string]int) error {
+	for i := range nodes {
+		stable := streaks[nodeIdentity(nodes[i])] >= stableConsecutiveCycles
+		name := stabilityMarkedName(nodes[i].Name, stable)
+		if name == nodes[i].Name {
+			continue
+		}
+		if err := sub.RenameNode(&nodes[i], name); err != nil {
+			return fmt.Errorf("rename stable node %s: %w", nodes[i].Protocol, err)
+		}
+	}
+	return nil
+}
+
+func writeStabilityResults(dir string, allNodes, urlNodes, speedNodes, geminiNodes []sub.Node, streaks map[string]int) error {
+	for _, group := range [][]sub.Node{allNodes, urlNodes, speedNodes, geminiNodes} {
+		if err := applyStabilityMarkers(group, streaks); err != nil {
+			return err
+		}
+	}
+	if err := writeSubscription(filepath.Join(dir, "all.txt"), allNodes); err != nil {
+		return err
+	}
+	if err := writeStageFiles(dir, "url-tested", urlNodes, true); err != nil {
+		return err
+	}
+	return writeStageFiles(dir, "speedtested", speedNodes, true)
+}
+
+func nodeIdentity(n sub.Node) string {
+	if n.Key != "" {
+		return n.Key
+	}
+	return n.URI
+}
+
 func applyNodeUpdatesByIdentity(nodes, updates []sub.Node) {
 	byIdentity := make(map[string]sub.Node, len(updates))
 	for _, n := range updates {
-		key := n.Key
-		if key == "" {
-			key = n.URI
-		}
-		byIdentity[key] = n
+		byIdentity[nodeIdentity(n)] = n
 	}
 	for i := range nodes {
-		key := nodes[i].Key
-		if key == "" {
-			key = nodes[i].URI
-		}
-		if updated, ok := byIdentity[key]; ok {
+		if updated, ok := byIdentity[nodeIdentity(nodes[i])]; ok {
 			nodes[i].URI = updated.URI
 			nodes[i].Name = updated.Name
 		}
