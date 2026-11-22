@@ -1072,6 +1072,28 @@ func TestTransientNetworkErrorClassification(t *testing.T) {
 	}
 }
 
+
+func TestSourceFetcherWithoutNamespaceUsesHostNetwork(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte("host-network-source"))
+	}))
+	defer server.Close()
+
+	fetch := sourceFetcherForNamespace(nil, "")
+	body, err := fetch(context.Background(), server.URL, time.Second)
+	if err != nil {
+		t.Fatalf("host-network fetch failed: %v", err)
+	}
+	if string(body) != "host-network-source" {
+		t.Fatalf("body = %q, want host-network response", body)
+	}
+	if requests != 1 {
+		t.Fatalf("host server received %d requests, want 1", requests)
+	}
+}
+
 func TestLoadSourcesMarksTransientRemoteFailures(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sources.txt")
