@@ -782,7 +782,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		if fallbackErr != nil {
 			return fallbackErr
 		}
-		replaceNodesByIdentity(speedResults, fallbackResults)
+		replaceNodesByIdentity(speedResults, fallbackCandidates, fallbackResults)
 		recovered := len(filterNodes(fallbackResults, func(n sub.Node) bool { return n.SpeedPassed }))
 		fmt.Fprintf(stdout, "Cloudflare fallback complete: %d recovered / %d tested | %d still failed\n", recovered, len(fallbackResults), len(fallbackResults)-recovered)
 	}
@@ -2130,14 +2130,17 @@ func cloudflareFallbackCandidates(nodes []sub.Node) []sub.Node {
 	return filterNodes(nodes, func(n sub.Node) bool { return n.URLPassed && !n.SpeedPassed })
 }
 
-func replaceNodesByIdentity(nodes, updates []sub.Node) {
-	byIdentity := make(map[string]sub.Node, len(updates))
-	for _, n := range updates {
-		byIdentity[nodeDedupKey(n)] = n
+func replaceNodesByIdentity(nodes, originals, updates []sub.Node) {
+	if len(originals) != len(updates) {
+		return
 	}
-	for i := range nodes {
-		if updated, ok := byIdentity[nodeDedupKey(nodes[i])]; ok {
-			nodes[i] = updated
+	for i, original := range originals {
+		key := nodeDedupKey(original)
+		for j := range nodes {
+			if nodeDedupKey(nodes[j]) == key {
+				nodes[j] = updates[i]
+				break
+			}
 		}
 	}
 }
