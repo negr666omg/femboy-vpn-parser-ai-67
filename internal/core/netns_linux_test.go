@@ -21,6 +21,21 @@ func TestParseDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestParseDefaultRouteForInterface(t *testing.T) {
+	routes := "default via 10.0.0.1 dev tun0 table 51820\n" +
+		"default via 192.168.1.75 dev enp1s0 table 100\n"
+	gateway, source, err := parseDefaultRouteForInterface(routes, "enp1s0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway != "192.168.1.75" {
+		t.Fatalf("gateway = %q, want 192.168.1.75", gateway)
+	}
+	if source != "" {
+		t.Fatalf("source = %q, want empty", source)
+	}
+}
+
 func TestParseDirectDefaultRoute(t *testing.T) {
 	gateway, source, err := parseDefaultRoute("default dev ppp0 scope link\n")
 	if err != nil {
