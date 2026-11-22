@@ -16,21 +16,35 @@ import (
 	"time"
 )
 
-// NetworkNamespace provides an isolated network stack whose default route is
-// obtained directly from the selected physical interface.
+// NetworkNamespace provides an isolated network stack. A private veth pair
+// connects it to the host; policy routing and temporary NAT rules make packets
+// arriving from that veth leave through the selected host interface. No second
+// MAC address, DHCP lease, host default-route replacement, or VPN route change
+// is required.
 type NetworkNamespace struct {
-	Name       string
-	ProxyIP    string
-	hostVeth   string
-	macvlan    string
-	dhcpPID    string
-	dhcpLease  string
-	resolvDir  string
-	namespaceCreated bool
-	hostVethCreated bool
-	macvlanCreated bool
-	dhcpAttempted bool
-	resolvDirCreated bool
+	Name             string
+	ProxyIP          string
+	HostIP           string
+	hostVeth         string
+	subnet           string
+	routeTable       int
+	firewallTable    string
+	firewallBackend  string
+	physicalInterface string
+	resolvDir        string
+
+	namespaceCreated  bool
+	hostVethCreated   bool
+	routeTableCreated bool
+	returnRuleCreated bool
+	egressRuleCreated bool
+	firewallCreated   bool
+	resolvDirCreated  bool
+	ipForwardOriginal string
+	ipForwardChanged  bool
+	rpFilterPath      string
+	rpFilterOriginal  string
+	rpFilterChanged   bool
 }
 
 // HostInterface returns the host-side veth used to reach the proxy inside this
@@ -44,15 +58,14 @@ func (n *NetworkNamespace) HostInterface() string {
 }
 
 // namespaceProxyDialer pins host-to-namespace proxy traffic to the veth and
-// selects its host-side address. This keeps SubWatch's local proxy transport
-// reachable even when policy routing or a VPN changes the default route.
-func namespaceProxyDialer(hostInterface string) *net.Dialer {
-	if hostInterface == "" {
+// binds the source address to the host side of that link.
+func namespaceProxyDialer(hostInterface, hostIP string) *net.Dialer {
+	if hostInterface == "" || hostIP == "" {
 		return nil
 	}
 	return &net.Dialer{
 		Timeout:   200 * time.Millisecond,
-		LocalAddr: &net.TCPAddr{IP: net.ParseIP("10.254.0.1")},
+		LocalAddr: &net.TCPAddr{IP: net.ParseIP(hostIP)},
 		Control: func(_, _ string, raw syscall.RawConn) error {
 			var setErr error
 			if err := raw.Control(func(fd uintptr) {
@@ -81,20 +94,46 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 	if it.Flags&net.FlagUp == 0 {
 		return nil, fmt.Errorf("network interface %q is DOWN", iface)
 	}
-	for _, tool := range []string{"ip", "sudo", "dhclient", "setpriv"} {
+	for _, tool := range []string{"ip", "sudo", "setpriv"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return nil, fmt.Errorf("Linux network isolation requires %s (install the corresponding system package)", tool)
 		}
 	}
-	ns := &NetworkNamespace{
-		Name: fmt.Sprintf("sw-%d", os.Getpid()),
-		ProxyIP: "10.254.0.2",
-		hostVeth: fmt.Sprintf("swh%d", os.Getpid()%1000000),
-		dhcpPID: fmt.Sprintf("/run/dhclient-sw-%d.pid", os.Getpid()),
-		dhcpLease: fmt.Sprintf("/var/lib/dhcp/dhclient-sw-%d.leases", os.Getpid()),
-		resolvDir: filepath.Join("/etc/netns", fmt.Sprintf("sw-%d", os.Getpid())),
+	if _, nftErr := exec.LookPath("nft"); nftErr != nil {
+		if _, iptablesErr := exec.LookPath("iptables"); iptablesErr != nil {
+			return nil, fmt.Errorf("Linux network isolation requires nftables (nft) or iptables for temporary NAT rules")
+		}
 	}
-	// Ask for administrator authorization once; all subsequent commands use sudo -n.
+
+	interfaceIP, interfacePrefix, gateway, err := selectedInterfaceRoute(ctx, it)
+	if err != nil {
+		return nil, err
+	}
+	subnet, hostIP, proxyIP, err := chooseProxySubnet(ctx, os.Getpid())
+	if err != nil {
+		return nil, err
+	}
+	tableID, err := chooseRouteTable(ctx, os.Getpid())
+	if err != nil {
+		return nil, err
+	}
+
+	id := strconv.Itoa(os.Getpid()%100000) + strconv.FormatInt(time.Now().UnixNano()%1679616, 36)
+	ns := &NetworkNamespace{
+		Name:              "sw-" + id,
+		ProxyIP:           proxyIP,
+		HostIP:            hostIP,
+		hostVeth:          "swh" + id,
+		subnet:            subnet.String(),
+		routeTable:        tableID,
+		firewallTable:     "subwatch" + id,
+		physicalInterface: it.Name,
+		resolvDir:         filepath.Join("/etc/netns", "sw-"+id),
+	}
+	peer := "swn" + id
+	ns.rpFilterPath = filepath.Join("/proc/sys/net/ipv4/conf", it.Name, "rp_filter")
+
+	fmt.Fprintln(output, "[network] requesting administrator authorization")
 	auth := exec.CommandContext(ctx, "sudo", "-v")
 	auth.Stdin, auth.Stdout, auth.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := auth.Run(); err != nil {
@@ -105,74 +144,348 @@ func NewNetworkNamespace(ctx context.Context, iface string, output io.Writer) (*
 		return nil, err
 	}
 	run := func(args ...string) error { return ns.root(ctx, args...) }
-	if err := run("ip", "netns", "add", ns.Name); err != nil { return fail(fmt.Errorf("create network namespace: %w", err)) }
+
+	fmt.Fprintf(output, "[network] creating isolated namespace and veth for %s\n", it.Name)
+	if err := run("ip", "netns", "add", ns.Name); err != nil {
+		return fail(fmt.Errorf("create network namespace: %w", err))
+	}
 	ns.namespaceCreated = true
-	if err := run("install", "-d", "-m", "755", "/etc/netns"); err != nil { return fail(fmt.Errorf("prepare isolated DNS directory: %w", err)) }
-	if err := run("mkdir", "-m", "755", ns.resolvDir); err != nil { return fail(fmt.Errorf("prepare isolated DNS: %w", err)) }
+	if err := run("install", "-d", "-m", "755", "/etc/netns"); err != nil {
+		return fail(fmt.Errorf("prepare isolated DNS directory: %w", err))
+	}
+	if err := run("mkdir", "-m", "755", ns.resolvDir); err != nil {
+		return fail(fmt.Errorf("prepare isolated DNS: %w", err))
+	}
 	ns.resolvDirCreated = true
 	resolv := filepath.Join(ns.resolvDir, "resolv.conf")
 	if err := run("sh", "-c", "printf 'nameserver 1.1.1.1\\nnameserver 9.9.9.9\\n' > "+shellQuote(resolv)); err != nil {
 		return fail(fmt.Errorf("prepare isolated DNS: %w", err))
 	}
-	peer := fmt.Sprintf("swn%d", os.Getpid()%1000000)
-	if err := run("ip", "link", "add", ns.hostVeth, "type", "veth", "peer", "name", peer); err != nil { return fail(fmt.Errorf("create local proxy link: %w", err)) }
-	ns.hostVethCreated = true
-	if err := run("ip", "link", "set", peer, "netns", ns.Name); err != nil { return fail(fmt.Errorf("move proxy link into namespace: %w", err)) }
-	if err := run("ip", "addr", "add", "10.254.0.1/30", "dev", ns.hostVeth); err != nil { return fail(fmt.Errorf("configure host proxy link: %w", err)) }
-	if err := run("ip", "link", "set", ns.hostVeth, "up"); err != nil { return fail(err) }
-	if err := run("ip", "-n", ns.Name, "link", "set", "lo", "up"); err != nil { return fail(err) }
-	if err := run("ip", "-n", ns.Name, "addr", "add", "10.254.0.2/30", "dev", peer); err != nil { return fail(err) }
-	if err := run("ip", "-n", ns.Name, "link", "set", peer, "up"); err != nil { return fail(err) }
 
-	ns.macvlan = fmt.Sprintf("swm%d", os.Getpid()%1000000)
-	if err := run("ip", "link", "add", "link", iface, "name", ns.macvlan, "type", "macvlan", "mode", "bridge"); err != nil {
-		return fail(fmt.Errorf("cannot create isolated link on %s (the network adapter or Wi-Fi may not support an additional MAC address): %w", iface, err))
+	if err := run("ip", "link", "add", ns.hostVeth, "type", "veth", "peer", "name", peer); err != nil {
+		return fail(fmt.Errorf("create isolated veth pair: %w", err))
 	}
-	ns.macvlanCreated = true
-	if err := run("ip", "link", "set", ns.macvlan, "netns", ns.Name); err != nil { return fail(fmt.Errorf("move isolated interface into namespace: %w", err)) }
-	if err := run("ip", "-n", ns.Name, "link", "set", ns.macvlan, "up"); err != nil { return fail(err) }
-	ns.dhcpAttempted = true
-	if err := run("ip", "netns", "exec", ns.Name, "dhclient", "-4", "-1", "-v", "-pf", ns.dhcpPID, "-lf", ns.dhcpLease, ns.macvlan); err != nil {
-		return fail(fmt.Errorf("DHCP did not obtain an address through %s; check that the network permits a second device/MAC: %w", iface, err))
+	ns.hostVethCreated = true
+	if err := run("ip", "link", "set", peer, "netns", ns.Name); err != nil {
+		return fail(fmt.Errorf("move veth into network namespace: %w", err))
 	}
-	route, err := ns.output(ctx, "ip", "-n", ns.Name, "route", "show", "default")
-	if err != nil {
-		return fail(fmt.Errorf("inspect isolated default route: %w", err))
+	if err := run("ip", "addr", "add", ns.HostIP+"/30", "dev", ns.hostVeth); err != nil {
+		return fail(fmt.Errorf("configure host veth address: %w", err))
 	}
-	if !defaultRouteUsesInterface(route, ns.macvlan) {
-		return fail(fmt.Errorf("selected interface %s did not provide the isolated default route (expected dev %s, got %q)", iface, ns.macvlan, strings.TrimSpace(route)))
+	if err := run("ip", "link", "set", ns.hostVeth, "up"); err != nil {
+		return fail(fmt.Errorf("activate host veth: %w", err))
 	}
-	fmt.Fprintf(output, "[network] isolated Linux namespace %s is online via %s (%s)\n", ns.Name, iface, strings.TrimSpace(route))
+	if err := run("ip", "-n", ns.Name, "link", "set", "lo", "up"); err != nil {
+		return fail(fmt.Errorf("activate namespace loopback: %w", err))
+	}
+	if err := run("ip", "-n", ns.Name, "addr", "add", ns.ProxyIP+"/30", "dev", peer); err != nil {
+		return fail(fmt.Errorf("configure namespace veth address: %w", err))
+	}
+	if err := run("ip", "-n", ns.Name, "link", "set", peer, "up"); err != nil {
+		return fail(fmt.Errorf("activate namespace veth: %w", err))
+	}
+	if err := run("ip", "-n", ns.Name, "route", "add", "default", "via", ns.HostIP, "dev", peer); err != nil {
+		return fail(fmt.Errorf("configure namespace default route: %w", err))
+	}
+
+	// Keep reply traffic to the namespace on the connected main-table route,
+	// even when a host VPN installs higher-priority policy rules. Packets
+	// arriving from this veth use a dedicated table whose default route points
+	// directly at the requested host interface, before VPN rules are evaluated.
+	fmt.Fprintf(output, "[network] installing policy route via %s (gateway %s)\n", it.Name, gateway)
+	if err := run("ip", "-4", "route", "add", interfacePrefix, "dev", it.Name, "scope", "link", "src", interfaceIP.String(), "table", strconv.Itoa(ns.routeTable)); err != nil {
+		return fail(fmt.Errorf("add connected route for %s to isolated routing table: %w", it.Name, err))
+	}
+	ns.routeTableCreated = true
+	if gateway != "" && !interfacePrefix.Contains(net.ParseIP(gateway)) {
+		if err := run("ip", "-4", "route", "add", gateway+"/32", "dev", it.Name, "scope", "link", "table", strconv.Itoa(ns.routeTable)); err != nil {
+			return fail(fmt.Errorf("add off-link gateway route %s through %s: %w", gateway, it.Name, err))
+		}
+	}
+	defaultRoute := []string{"ip", "-4", "route", "add", "default"}
+	if gateway != "" {
+		defaultRoute = append(defaultRoute, "via", gateway)
+	}
+	defaultRoute = append(defaultRoute, "dev", it.Name, "table", strconv.Itoa(ns.routeTable))
+	if err := run(defaultRoute...); err != nil {
+		return fail(fmt.Errorf("add isolated default route through %s: %w", it.Name, err))
+	}
+	if err := run("ip", "-4", "rule", "add", "pref", "1", "to", ns.subnet, "lookup", "main"); err != nil {
+		return fail(fmt.Errorf("add return route policy rule: %w", err))
+	}
+	ns.returnRuleCreated = true
+	if err := run("ip", "-4", "rule", "add", "pref", "2", "iif", ns.hostVeth, "lookup", strconv.Itoa(ns.routeTable)); err != nil {
+		return fail(fmt.Errorf("add selected-interface policy rule: %w", err))
+	}
+	ns.egressRuleCreated = true
+
+	if err := ns.enableForwarding(ctx); err != nil {
+		return fail(fmt.Errorf("enable temporary IPv4 forwarding: %w", err))
+	}
+	if err := ns.installFirewall(ctx, it.Name); err != nil {
+		return fail(fmt.Errorf("install temporary forwarding/NAT rules: %w", err))
+	}
+
+	fmt.Fprintf(output, "[network] isolated namespace %s is online via %s (existing host address %s; no extra DHCP/MAC)\n", ns.Name, it.Name, interfaceIP)
 	return ns, nil
 }
 
-func defaultRouteUsesInterface(routes, iface string) bool {
+func selectedInterfaceRoute(ctx context.Context, iface *net.Interface) (net.IP, string, string, error) {
+	addrList, err := iface.Addrs()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("inspect addresses on %s: %w", iface.Name, err)
+	}
+	type address struct {
+		ip     net.IP
+		prefix string
+	}
+	var addresses []address
+	for _, value := range addrList {
+		ip, network, parseErr := net.ParseCIDR(value.String())
+		if parseErr != nil || ip.To4() == nil || !ip.IsGlobalUnicast() {
+			continue
+		}
+		ip = ip.To4()
+		prefix := (&net.IPNet{IP: ip.Mask(network.Mask), Mask: network.Mask}).String()
+		addresses = append(addresses, address{ip: ip, prefix: prefix})
+	}
+	if len(addresses) == 0 {
+		return nil, "", "", fmt.Errorf("network interface %q has no usable global IPv4 address", iface.Name)
+	}
+
+	cmd := exec.CommandContext(ctx, "ip", "-4", "route", "show", "default", "dev", iface.Name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("inspect IPv4 default route through %s: %w: %s", iface.Name, err, strings.TrimSpace(string(out)))
+	}
+	gateway, source, err := parseDefaultRoute(string(out))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("network interface %q has no IPv4 default route; connect it to a network with a gateway: %w", iface.Name, err)
+	}
+	for _, addr := range addresses {
+		if source == "" || addr.ip.Equal(net.ParseIP(source)) {
+			return addr.ip, addr.prefix, gateway, nil
+		}
+	}
+	return nil, "", "", fmt.Errorf("default route through %s selects source %s, but that address is not assigned to the interface", iface.Name, source)
+}
+
+func parseDefaultRoute(routes string) (gateway, source string, err error) {
 	for _, line := range strings.Split(routes, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 || fields[0] != "default" {
 			continue
 		}
 		for i := 0; i+1 < len(fields); i++ {
-			if fields[i] == "dev" && fields[i+1] == iface {
-				return true
+			switch fields[i] {
+			case "via":
+				gateway = fields[i+1]
+			case "src":
+				source = fields[i+1]
 			}
+		}
+		if gateway != "" {
+			ip := net.ParseIP(gateway)
+			if ip == nil || ip.To4() == nil {
+				return "", "", fmt.Errorf("invalid IPv4 gateway %q", gateway)
+			}
+		}
+		if source != "" {
+			ip := net.ParseIP(source)
+			if ip == nil || ip.To4() == nil {
+				return "", "", fmt.Errorf("invalid IPv4 source address %q", source)
+			}
+		}
+		return gateway, source, nil
+	}
+	return "", "", fmt.Errorf("no default route found")
+}
+
+func chooseProxySubnet(ctx context.Context, pid int) (*net.IPNet, string, string, error) {
+	cmd := exec.CommandContext(ctx, "ip", "-4", "route", "show", "table", "all")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("inspect existing IPv4 routes before allocating the namespace link: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	used := parseRouteNetworks(string(out))
+	mask := net.CIDRMask(30, 32)
+	start := pid % 16384
+	for offset := 0; offset < 16384; offset++ {
+		index := (start + offset) % 16384
+		base := net.IPv4(10, 254, byte(index/64), byte((index%64)*4)).To4()
+		candidate := &net.IPNet{IP: base, Mask: mask}
+		if overlapsAnyRoute(candidate, used) {
+			continue
+		}
+		host := append(net.IP(nil), base...)
+		host[3]++
+		proxy := append(net.IP(nil), base...)
+		proxy[3] += 2
+		return candidate, host.String(), proxy.String(), nil
+	}
+	return nil, "", "", fmt.Errorf("no unused /30 subnet is available in the SubWatch private address pool 10.254.0.0/16")
+}
+
+func parseRouteNetworks(routes string) []*net.IPNet {
+	var result []*net.IPNet
+	for _, line := range strings.Split(routes, "\n") {
+		for _, field := range strings.Fields(line) {
+			if _, network, err := net.ParseCIDR(field); err == nil && network.IP.To4() != nil {
+				network.IP = network.IP.To4()
+				result = append(result, network)
+				break
+			}
+			if ip := net.ParseIP(field); ip != nil && ip.To4() != nil {
+				result = append(result, &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)})
+				break
+			}
+		}
+	}
+	return result
+}
+
+func overlapsAnyRoute(candidate *net.IPNet, routes []*net.IPNet) bool {
+	for _, route := range routes {
+		if route.Contains(candidate.IP) || candidate.Contains(route.IP) {
+			return true
 		}
 	}
 	return false
 }
 
-func (n *NetworkNamespace) root(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-n"}, args...)...)
-	out, err := cmd.CombinedOutput()
-	if err != nil { return fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out))) }
+func chooseRouteTable(ctx context.Context, pid int) (int, error) {
+	start := 10000 + pid%1000000
+	for offset := 0; offset < 10000; offset++ {
+		table := start + offset
+		cmd := exec.CommandContext(ctx, "ip", "-4", "route", "show", "table", strconv.Itoa(table))
+		out, err := cmd.CombinedOutput()
+		if err == nil && strings.TrimSpace(string(out)) == "" {
+			return table, nil
+		}
+		if err != nil && strings.Contains(strings.ToLower(string(out)), "fib table does not exist") {
+			return table, nil
+		}
+	}
+	return 0, fmt.Errorf("could not allocate an unused IPv4 routing table")
+}
+
+func (n *NetworkNamespace) enableForwarding(ctx context.Context) error {
+	forwardPath := "/proc/sys/net/ipv4/ip_forward"
+	forward, err := os.ReadFile(forwardPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", forwardPath, err)
+	}
+	n.ipForwardOriginal = strings.TrimSpace(string(forward))
+	if n.ipForwardOriginal != "1" {
+		if err := n.writeRootFile(ctx, forwardPath, "1"); err != nil {
+			return err
+		}
+		n.ipForwardChanged = true
+	}
+
+	rpFilter, err := os.ReadFile(n.rpFilterPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", n.rpFilterPath, err)
+	}
+	n.rpFilterOriginal = strings.TrimSpace(string(rpFilter))
+	if n.rpFilterOriginal != "2" {
+		if err := n.writeRootFile(ctx, n.rpFilterPath, "2"); err != nil {
+			return fmt.Errorf("set loose reverse-path filtering on the selected interface: %w", err)
+		}
+		n.rpFilterChanged = true
+	}
 	return nil
 }
 
-func (n *NetworkNamespace) output(ctx context.Context, args ...string) (string, error) {
+func (n *NetworkNamespace) installFirewall(ctx context.Context, iface string) error {
+	if _, err := exec.LookPath("nft"); err == nil {
+		if err := n.rootInput(ctx, n.nftRules(iface), "nft", "-f", "-"); err == nil {
+			n.firewallBackend = "nft"
+			n.firewallCreated = true
+			return nil
+		} else if _, iptablesErr := exec.LookPath("iptables"); iptablesErr == nil {
+			if fallbackErr := n.installIPTables(ctx, iface); fallbackErr == nil {
+				return nil
+			} else {
+				return fmt.Errorf("nft failed (%v); iptables fallback failed (%w)", err, fallbackErr)
+			}
+		} else {
+			return fmt.Errorf("nft: %w", err)
+		}
+	}
+	if _, err := exec.LookPath("iptables"); err == nil {
+		return n.installIPTables(ctx, iface)
+	}
+	return fmt.Errorf("neither nft nor iptables is installed")
+}
+
+func (n *NetworkNamespace) nftRules(iface string) string {
+	hostVeth := nftQuote(n.hostVeth)
+	physical := nftQuote(iface)
+	return fmt.Sprintf("table ip %s {\n"+
+		"  chain forward {\n"+
+		"    type filter hook forward priority -10; policy accept;\n"+
+		"    iifname %s oifname %s ip saddr %s counter accept\n"+
+		"    iifname %s oifname %s ip daddr %s ct state established,related counter accept\n"+
+		"  }\n"+
+		"  chain postrouting {\n"+
+		"    type nat hook postrouting priority 99; policy accept;\n"+
+		"    oifname %s ip saddr %s counter masquerade\n"+
+		"  }\n"+
+		"}\n",
+		n.firewallTable, hostVeth, physical, n.ProxyIP, physical, hostVeth, n.ProxyIP, physical, n.ProxyIP)
+}
+
+func nftQuote(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\"", "\\\"")
+	return "\"" + value + "\""
+}
+
+func (n *NetworkNamespace) installIPTables(ctx context.Context, iface string) error {
+	outbound := []string{"-w", "10", "-I", "FORWARD", "1", "-i", n.hostVeth, "-o", iface, "-s", n.ProxyIP + "/32", "-j", "ACCEPT"}
+	inbound := []string{"-w", "10", "-I", "FORWARD", "1", "-i", iface, "-o", n.hostVeth, "-d", n.ProxyIP + "/32", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"}
+	masquerade := []string{"-w", "10", "-t", "nat", "-I", "POSTROUTING", "1", "-s", n.ProxyIP + "/32", "-o", iface, "-j", "MASQUERADE"}
+
+	if err := n.root(ctx, append([]string{"iptables"}, outbound...)...); err != nil {
+		return fmt.Errorf("allow namespace egress: %w", err)
+	}
+	if err := n.root(ctx, append([]string{"iptables"}, inbound...)...); err != nil {
+		_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.hostVeth, "-o", iface, "-s", n.ProxyIP+"/32", "-j", "ACCEPT")
+		return fmt.Errorf("allow namespace return traffic: %w", err)
+	}
+	if err := n.root(ctx, append([]string{"iptables"}, masquerade...)...); err != nil {
+		_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", iface, "-o", n.hostVeth, "-d", n.ProxyIP+"/32", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.hostVeth, "-o", iface, "-s", n.ProxyIP+"/32", "-j", "ACCEPT")
+		return fmt.Errorf("enable namespace source NAT: %w", err)
+	}
+	n.firewallBackend = "iptables"
+	n.firewallCreated = true
+	return nil
+}
+
+func (n *NetworkNamespace) root(ctx context.Context, args ...string) error {
 	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-n"}, args...)...)
 	out, err := cmd.CombinedOutput()
-	if err != nil { return string(out), fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out))) }
-	return string(out), nil
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (n *NetworkNamespace) rootInput(ctx context.Context, input string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-n"}, args...)...)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func (n *NetworkNamespace) writeRootFile(ctx context.Context, path, value string) error {
+	script := "printf '%s\\n' " + shellQuote(value) + " > " + shellQuote(path)
+	return n.root(ctx, "sh", "-c", script)
 }
 
 // Command runs a process inside the namespace as the invoking user.
@@ -184,20 +497,30 @@ func (n *NetworkNamespace) Command(ctx context.Context, binary string, args ...s
 }
 
 func (n *NetworkNamespace) Close() {
-	if n == nil { return }
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	// Release only resources this instance successfully created. This avoids
-	// deleting a pre-existing link or namespace when setup fails due to a name
-	// collision, and also handles a macvlan that was created but not moved.
-	if n.dhcpAttempted && n.namespaceCreated {
-		_ = n.root(ctx, "ip", "netns", "exec", n.Name, "dhclient", "-r", "-pf", n.dhcpPID)
+	if n == nil {
+		return
 	}
-	if n.macvlanCreated {
-		if n.namespaceCreated {
-			_ = n.root(ctx, "ip", "-n", n.Name, "link", "del", n.macvlan)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	if n.firewallCreated {
+		switch n.firewallBackend {
+		case "nft":
+			_ = n.root(ctx, "nft", "delete", "table", "ip", n.firewallTable)
+		case "iptables":
+			_ = n.root(ctx, "iptables", "-w", "10", "-t", "nat", "-D", "POSTROUTING", "-s", n.ProxyIP+"/32", "-o", n.physicalInterface, "-j", "MASQUERADE")
+			_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.physicalInterface, "-o", n.hostVeth, "-d", n.ProxyIP+"/32", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+			_ = n.root(ctx, "iptables", "-w", "10", "-D", "FORWARD", "-i", n.hostVeth, "-o", n.physicalInterface, "-s", n.ProxyIP+"/32", "-j", "ACCEPT")
 		}
-		_ = n.root(ctx, "ip", "link", "del", n.macvlan)
+	}
+	if n.egressRuleCreated {
+		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", "2", "iif", n.hostVeth, "lookup", strconv.Itoa(n.routeTable))
+	}
+	if n.returnRuleCreated {
+		_ = n.root(ctx, "ip", "-4", "rule", "del", "pref", "1", "to", n.subnet, "lookup", "main")
+	}
+	if n.routeTableCreated {
+		_ = n.root(ctx, "ip", "-4", "route", "flush", "table", strconv.Itoa(n.routeTable))
 	}
 	if n.namespaceCreated {
 		_ = n.root(ctx, "ip", "netns", "del", n.Name)
@@ -205,12 +528,19 @@ func (n *NetworkNamespace) Close() {
 	if n.hostVethCreated {
 		_ = n.root(ctx, "ip", "link", "del", n.hostVeth)
 	}
-	if n.dhcpAttempted {
-		_ = n.root(ctx, "rm", "-f", n.dhcpPID, n.dhcpLease)
-	}
 	if n.resolvDirCreated {
 		_ = n.root(ctx, "rm", "-rf", n.resolvDir)
 	}
+	// Changing ip_forward resets several IPv4 interface defaults on Linux, so
+	// restore it before restoring the interface's original rp_filter value.
+	if n.ipForwardChanged {
+		_ = n.writeRootFile(ctx, "/proc/sys/net/ipv4/ip_forward", n.ipForwardOriginal)
+	}
+	if n.rpFilterChanged {
+		_ = n.writeRootFile(ctx, n.rpFilterPath, n.rpFilterOriginal)
+	}
 }
 
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
