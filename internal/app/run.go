@@ -355,9 +355,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if opts.MaxSpeedDuration <= 0 {
 		opts.MaxSpeedDuration = DefaultOptions().MaxSpeedDuration
 	}
-	if opts.SpeedProvider == "ookla" {
+	if opts.SpeedProvider == "ookla" && !opts.CloudflareFallback {
 		// These settings are specific to the Cloudflare HTTP endpoint and do
-		// not apply to Ookla's automatically selected Speedtest.net server.
+		// not apply to Ookla unless the optional fallback stage is enabled.
 		opts.FirstByteTimeout = 0
 		opts.SpeedSampleInterval = 0
 		opts.DownloadBytes = 0
@@ -605,7 +605,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
-	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
+	pipelineStageTotal, serviceStageNumber := 4, 4
+	if cloudflareFallbackEnabled(opts) {
+		pipelineStageTotal, serviceStageNumber = 5, 5
+	}
+	fmt.Fprintf(stdout, "\n[2/%d] URL TEST: %d nodes, target %s, timeout %s\n", pipelineStageTotal, len(selected), opts.URL, opts.URLTimeout)
 	var urlPassedLive []sub.Node
 	var urlFilesMu sync.Mutex
 	urlResults, stageErr := runStageWithLiveCallbackMode(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
@@ -663,7 +667,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 
 	// Stage 2 begins only after every URL test has completed (global barrier).
 	// urlPassed remains the authoritative in-memory result set.
-	fmt.Fprintf(stdout, "\n[3/4] SPEED TEST (%s): %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", strings.ToUpper(opts.SpeedProvider), len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
+	fmt.Fprintf(stdout, "\n[3/%d] SPEED TEST (%s): %d URL-passed nodes, timeout %s, minimum DL/UL %.2f/%.2f Mbps\n", pipelineStageTotal, strings.ToUpper(opts.SpeedProvider), len(urlPassed), opts.SpeedTimeout, opts.MinDownload, opts.MinUpload)
 	speedResults, stageErr := runStageWithLiveCallbackMode(ctx, "SPEED TEST", urlPassed, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "starting "+strings.ToUpper(opts.SpeedProvider)+" speed test…"))
 		down, up, testErr := runSpeedTestWithProgress(stageCtx, *n, opts, func(progress check.SpeedProgress) {
@@ -701,20 +705,86 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		live(*n, speedLiveDetail(*n, speedState))
 	}, func(completed sub.Node) error {
-		if !completed.SpeedPassed {
+		if !completed.SpeedPassed && !cloudflareFallbackEnabled(opts) {
 			reason := completed.SpeedError
 			if reason == "" {
 				reason = "speed test did not pass"
 			}
 			failedItems = append(failedItems, failureRecordFromNode("SPEED TEST", completed, reason))
 		}
-		if completed.RenameError != "" {
+		if completed.RenameError != "" && (!cloudflareFallbackEnabled(opts) || completed.SpeedPassed) {
 			failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
 		}
 		return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
 	}, opts.LiveDisplayMode)
 	if stageErr != nil {
 		return stageErr
+	}
+
+	if cloudflareFallbackEnabled(opts) {
+		fallbackCandidates := cloudflareFallbackCandidates(speedResults)
+		fmt.Fprintf(stdout, "\n[4/%d] CLOUDFLARE FALLBACK: %d URL-passed nodes failed Ookla; testing only those nodes\n", pipelineStageTotal, len(fallbackCandidates))
+		fallbackResults, fallbackErr := runStageWithLiveCallbackMode(ctx, "CLOUDFLARE FALLBACK", fallbackCandidates, opts.SpeedConcurrency, stdout, func(n *sub.Node) bool { return n.SpeedPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
+			primaryReason := strings.TrimSpace(n.SpeedError)
+			if primaryReason == "" {
+				primaryReason = speedThresholdError(n.DownloadMbps, n.UploadMbps, opts.MinDownload, opts.MinUpload)
+			}
+			if primaryReason == "" {
+				primaryReason = "Ookla speed test did not pass"
+			}
+
+			live(*n, speedLiveDetail(*n, "starting Cloudflare fallback…"))
+			down, up, testErr := runSpeedTestWithProvider(stageCtx, *n, opts, "cloudflare", func(progress check.SpeedProgress) {
+				live(*n, speedProgressDetail(*n, progress))
+			})
+			n.DownloadMbps, n.UploadMbps = down, up
+			fallbackReason := ""
+			if testErr != nil {
+				fallbackReason = testErr.Error()
+			} else {
+				fallbackReason = speedThresholdError(down, up, opts.MinDownload, opts.MinUpload)
+			}
+
+			if opts.RenameNodes {
+				n.RenameError = renameNodeAfterSpeed(stageCtx, n, opts, down, up)
+			}
+			if fallbackReason != "" {
+				n.SpeedPassed = false
+				n.SpeedError = fmt.Sprintf("Ookla: %s; Cloudflare fallback: %s", primaryReason, fallbackReason)
+				detail := speedLiveDetail(*n, "FAILED: "+shortLiveError(fallbackReason))
+				if n.RenameError != "" {
+					detail += " | rename: " + shortLiveError(n.RenameError)
+				}
+				live(*n, detail)
+				return
+			}
+
+			n.SpeedPassed = true
+			n.SpeedError = ""
+			detail := "Cloudflare PASS (recovered after Ookla failure)"
+			if n.RenameError != "" {
+				detail += " | rename: " + shortLiveError(n.RenameError)
+			}
+			live(*n, speedLiveDetail(*n, detail))
+		}, func(completed sub.Node) error {
+			if !completed.SpeedPassed {
+				reason := completed.SpeedError
+				if reason == "" {
+					reason = "Ookla and Cloudflare fallback did not pass"
+				}
+				failedItems = append(failedItems, failureRecordFromNode("SPEED TEST", completed, reason))
+			}
+			if completed.RenameError != "" {
+				failedItems = append(failedItems, failureRecordFromNode("RENAME", completed, completed.RenameError))
+			}
+			return writeFailureReport(filepath.Join(opts.OutDir, "failed.txt"), opts.URL, failedItems)
+		}, opts.LiveDisplayMode)
+		if fallbackErr != nil {
+			return fallbackErr
+		}
+		replaceNodesByIdentity(speedResults, fallbackResults)
+		recovered := len(filterNodes(fallbackResults, func(n sub.Node) bool { return n.SpeedPassed }))
+		fmt.Fprintf(stdout, "Cloudflare fallback complete: %d recovered / %d tested | %d still failed\n", recovered, len(fallbackResults), len(fallbackResults)-recovered)
 	}
 
 	// Speed testing changes display names after the URL-stage file was first
@@ -738,7 +808,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 
 	// Stage 3 starts only after every speed test has completed. No service check
 	// is run on a node that failed either speed threshold.
-	fmt.Fprintf(stdout, "\n[4/4] SERVICE CHECK: %d speed-passed nodes, Gemini must be fully available\n", len(speedPassed))
+	fmt.Fprintf(stdout, "\n[%d/%d] SERVICE CHECK: %d speed-passed nodes, Gemini must be fully available\n", serviceStageNumber, pipelineStageTotal, len(speedPassed))
 	serviceResults, stageErr := runStageWithLiveCallbackMode(ctx, "SERVICE CHECK", speedPassed, opts.ServiceConcurrency, stdout, func(n *sub.Node) bool { return geminiAvailable(*n) }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, speedLiveDetail(*n, "Gemini: checking…"))
 		status, note, region, ipInfo, testErr := runServiceCheck(stageCtx, *n, opts)
@@ -1997,7 +2067,7 @@ func stageResultDetail(label string, n sub.Node) string {
 	switch label {
 	case "URL TEST":
 		return urlLiveDetail(n)
-	case "SPEED TEST":
+	case "SPEED TEST", "CLOUDFLARE FALLBACK":
 		state := "FAIL"
 		if n.SpeedPassed {
 			state = "PASS"
@@ -2020,7 +2090,7 @@ func setStageError(n *sub.Node, label, message string) {
 	switch label {
 	case "URL TEST":
 		n.URLError = message
-	case "SPEED TEST":
+	case "SPEED TEST", "CLOUDFLARE FALLBACK":
 		n.SpeedError = message
 	case "SERVICE CHECK":
 		n.ServiceError = message
@@ -2052,17 +2122,41 @@ func speedThresholdError(download, upload, minDownload, minUpload float64) strin
 	return strings.Join(reasons, "; ")
 }
 
+func cloudflareFallbackEnabled(opts Options) bool {
+	return opts.SpeedProvider == "ookla" && opts.CloudflareFallback
+}
+
+func cloudflareFallbackCandidates(nodes []sub.Node) []sub.Node {
+	return filterNodes(nodes, func(n sub.Node) bool { return n.URLPassed && !n.SpeedPassed })
+}
+
+func replaceNodesByIdentity(nodes, updates []sub.Node) {
+	byIdentity := make(map[string]sub.Node, len(updates))
+	for _, n := range updates {
+		byIdentity[nodeDedupKey(n)] = n
+	}
+	for i := range nodes {
+		if updated, ok := byIdentity[nodeDedupKey(nodes[i])]; ok {
+			nodes[i] = updated
+		}
+	}
+}
+
 func runSpeedTest(parent context.Context, n sub.Node, opts Options) (float64, float64, error) {
 	return runSpeedTestWithProgress(parent, n, opts, nil)
 }
 
 func runSpeedTestWithProgress(parent context.Context, n sub.Node, opts Options, progress func(check.SpeedProgress)) (float64, float64, error) {
+	return runSpeedTestWithProvider(parent, n, opts, opts.SpeedProvider, progress)
+}
+
+func runSpeedTestWithProvider(parent context.Context, n sub.Node, opts Options, provider string, progress func(check.SpeedProgress)) (float64, float64, error) {
 	var down, up float64
 	err := withNodeClient(parent, n, opts, opts.SpeedTimeout, func(ctx context.Context, client *http.Client) error {
 		testCtx, cancel := context.WithTimeout(ctx, opts.SpeedTimeout)
 		defer cancel()
 		var testErr error
-		if opts.SpeedProvider == "ookla" {
+		if strings.EqualFold(strings.TrimSpace(provider), "ookla") {
 			down, up, testErr = check.OoklaSpeedTestWithProgress(testCtx, client, opts.MaxSpeedDuration, progress)
 		} else {
 			down, up, testErr = check.SpeedTestWithProgress(testCtx, client, opts.SpeedDownloadURL, opts.SpeedUploadURL, opts.DownloadBytes, opts.UploadBytes, progress, opts.FirstByteTimeout, opts.MaxSpeedDuration, opts.SpeedSampleInterval)
