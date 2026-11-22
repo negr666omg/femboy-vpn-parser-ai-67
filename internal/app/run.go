@@ -77,26 +77,61 @@ type loadedSource struct {
 	Reference  string
 	Body       []byte
 	Line       int
+	ListPath   string
 	LoadError  error
 	ParseError string
 }
 
 type sourceQualityStats struct {
-	Reference string
-	Line int
-	Status string
-	Eligible int
-	Exclusive int
-	Shared int
-	ExclusiveURLPassed int
-	SharedURLPassed int
+	Reference  string
+	Line       int
+	ListPath   string
+	Status     string
+	Eligible   int
+	Exclusive  int
+	Shared     int
+	ExclusiveURLPassed   int
+	SharedURLPassed      int
 	ExclusiveSpeedPassed int
-	SharedSpeedPassed int
-	ExclusiveGemini int
-	SharedGemini int
+	SharedSpeedPassed    int
+	ExclusiveGemini      int
+	SharedGemini         int
 }
 
-func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
+type sourceQualityTotals struct {
+	SourceAppearances    int
+	GlobalUnique         int
+	SharedUnique         int
+	ExclusiveUnique      int
+	ExclusiveURLPassed   int
+	SharedURLPassed      int
+	ExclusiveSpeedPassed int
+	SharedSpeedPassed    int
+	ExclusiveGemini      int
+	SharedGemini         int
+}
+
+func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) (runErr error) {
+	if strings.TrimSpace(opts.OutDir) == "" {
+		opts.OutDir = "out"
+	}
+	if err := os.MkdirAll(opts.OutDir, 0700); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	failures := newRunFailureLog()
+	defer func() {
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			failures.Add("PROGRAM", runErr.Error())
+		}
+		if err := failures.Write(filepath.Join(opts.OutDir, "failed.txt")); err != nil {
+			if runErr != nil {
+				runErr = fmt.Errorf("%w (also failed to write failed.txt: %v)", runErr, err)
+			} else {
+				runErr = fmt.Errorf("write failed.txt: %w", err)
+			}
+		}
+	}()
+
 	if opts.URLConcurrency < 1 || opts.URLConcurrency > 64 {
 		return fmt.Errorf("url_test.concurrency must be between 1 and 64")
 	}
@@ -289,7 +324,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			if lineNo < 1 {
 				lineNo = i + 1
 			}
-			sourceDiagnostics = append(sourceDiagnostics, fmt.Sprintf("source %d (%s): skipped: %v", lineNo, sourceProgressTitle(source.Reference), source.LoadError))
+			diagnostic := fmt.Sprintf("source %d (%s): skipped: %v", lineNo, sourceProgressTitle(source.Reference), source.LoadError)
+			sourceDiagnostics = append(sourceDiagnostics, diagnostic)
+			failures.Add("SOURCE", diagnostic)
 			continue
 		}
 		progress := sourceProgress{
@@ -313,7 +350,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			if lineNo < 1 {
 				lineNo = i + 1
 			}
-			sourceDiagnostics = append(sourceDiagnostics, fmt.Sprintf("source %d (%s): %v", lineNo, sourceProgressTitle(source.Reference), parseErr))
+			diagnostic := fmt.Sprintf("source %d (%s): %v", lineNo, sourceProgressTitle(source.Reference), parseErr)
+			sourceDiagnostics = append(sourceDiagnostics, diagnostic)
+			failures.Add("SOURCE PARSE", diagnostic)
 			continue
 		}
 		perSourceNodes[i] = nodes
@@ -330,10 +369,10 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	for _, diagnostic := range sourceDiagnostics {
 		fmt.Fprintln(stderr, diagnostic)
 	}
-	if err := writeInvalidLines(filepath.Join(opts.OutDir, "invalid.txt"), invalidConfigs); err != nil {
-		return fmt.Errorf("write invalid configs: %w", err)
+	for i, line := range invalidConfigs {
+		failures.Add("PARSER", fmt.Sprintf("rejected malformed or unsupported input #%d: %s", i+1, redactFailureInput(line)))
 	}
-	fmt.Fprintf(stdout, "Invalid configs saved: %d -> %s\n", len(invalidConfigs), filepath.Join(opts.OutDir, "invalid.txt"))
+	fmt.Fprintf(stdout, "Rejected input lines: %d | details: %s\n", len(invalidConfigs), filepath.Join(opts.OutDir, "failed.txt"))
 	if len(parsed) == 0 {
 		return fmt.Errorf("no supported proxy nodes found (invalid lines: %d; source failures: %d; check source URLs and retry)", invalid, sourceErrors)
 	}
@@ -380,8 +419,11 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	// Stage 1: every selected unique node gets the URL test. Nothing is speed-tested here.
 	fmt.Fprintf(stdout, "\n[2/4] URL TEST: %d nodes, target %s, timeout %s\n", len(selected), opts.URL, opts.URLTimeout)
 	var urlPassedLive []sub.Node
-	var urlFailedLive []sub.Node
-	var urlFilesMu sync.Mutex
+	lastURLSnapshot := time.Now()
+	completedSinceURLSnapshot := 0
+	if err := writeStageFiles(opts.OutDir, "url-tested", nil, true); err != nil {
+		return fmt.Errorf("initialize URL result files: %w", err)
+	}
 	urlResults, stageErr := runStageWithLiveCallback(ctx, "URL TEST", selected, opts.URLConcurrency, stdout, func(n *sub.Node) bool { return n.URLPassed }, func(stageCtx context.Context, n *sub.Node, live func(sub.Node, string)) {
 		live(*n, "checking URL…")
 		passed, latency, testErr := runURLTest(stageCtx, *n, opts)
@@ -400,29 +442,29 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		live(*n, urlLiveDetail(*n))
 	}, func(completed sub.Node) error {
-		urlFilesMu.Lock()
-		defer urlFilesMu.Unlock()
+		completedSinceURLSnapshot++
 		if completed.URLPassed {
 			urlPassedLive = append(urlPassedLive, completed)
-			return writeStageFiles(opts.OutDir, "url-test-finished", urlPassedLive, true)
+		} else {
+			failures.AddNode("URL TEST", completed, completed.URLError)
 		}
-		urlFailedLive = append(urlFailedLive, completed)
-		if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailedLive, true); err != nil {
-			return err
+		if completed.RenameError != "" {
+			failures.AddNode("RENAME", completed, completed.RenameError)
 		}
-		return writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailedLive)
+		if !shouldRefreshStageSnapshot(completedSinceURLSnapshot, time.Now(), lastURLSnapshot) {
+			return nil
+		}
+		if err := writeStageFiles(opts.OutDir, "url-tested", urlPassedLive, true); err != nil {
+			return fmt.Errorf("refresh URL result files: %w", err)
+		}
+		lastURLSnapshot = time.Now()
+		completedSinceURLSnapshot = 0
+		return nil
 	})
 	if stageErr != nil {
 		return stageErr
 	}
 	urlPassed := filterNodes(urlResults, func(n sub.Node) bool { return n.URLPassed })
-	urlFailed := filterNodes(urlResults, func(n sub.Node) bool { return !n.URLPassed })
-	if err := writeStageFiles(opts.OutDir, "url-test-failed", urlFailed, true); err != nil {
-		return err
-	}
-	if err := writeURLFailureReport(filepath.Join(opts.OutDir, "url-test-failures.txt"), opts.URL, urlFailed); err != nil {
-		return err
-	}
 	// Keep every selected node's remark synchronized in all.txt too. Nodes
 	// that fail URL reachability cannot have a meaningful country/speed result,
 	// so they receive the explicit 🌐 Unknown fallback rather than the source name.
@@ -432,10 +474,10 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
-	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "URL test complete: %d passed / %d failed. Per-protocol URL lists were updated during testing.\n", len(urlPassed), len(urlResults)-len(urlPassed))
+	fmt.Fprintf(stdout, "URL test complete: %d passed / %d failed. Result files refresh every 5s or 100 completed configs.\n", len(urlPassed), len(urlResults)-len(urlPassed))
 
 	// Stage 2 begins only after every URL test has completed (global barrier).
 	// Every URL-passed node is tested by the primary provider exactly once.
@@ -491,10 +533,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}, nil)
 		speedResults = mergeResults(speedResults, nil, fallbackResults, nil)
 		cloudflareFallbackPassed := filterNodes(fallbackResults, func(n sub.Node) bool { return n.CloudflarePassed })
-		if err := writeStageFiles(opts.OutDir, "cloudflare-fallback-finished", cloudflareFallbackPassed, true); err != nil {
-			return err
-		}
-		fmt.Fprintf(stdout, "Cloudflare fallback complete: %d rescued / %d tested.\n", len(cloudflareFallbackPassed), len(fallbackResults))
+		fmt.Fprintf(stdout, "Cloudflare fallback complete: %d rescued / %d tested; rescued nodes are included in speedtested.txt.\n", len(cloudflareFallbackPassed), len(fallbackResults))
 	}
 
 	// Speed testing may rename nodes after the URL-stage file was first written.
@@ -504,17 +543,44 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err := writeSubscription(filepath.Join(opts.OutDir, "all.txt"), parsed); err != nil {
 		return err
 	}
-	if err := writeStageFiles(opts.OutDir, "url-test-finished", urlPassed, true); err != nil {
+	if err := writeStageFiles(opts.OutDir, "url-tested", urlPassed, true); err != nil {
 		return err
 	}
 
 	speedPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.SpeedPassed })
 	speedFailed := filterNodes(speedResults, func(n sub.Node) bool { return !n.SpeedPassed })
-	if err := writeStageFiles(opts.OutDir, "speed-test-finished", speedPassed, true); err != nil {
-		return err
+	for _, node := range speedFailed {
+		reason := node.SpeedError
+		if reason == "" {
+			reason = "speed test failed without an error message"
+		}
+		failures.AddNode("SPEED TEST", node, reason)
 	}
-	if err := writeSpeedTestReport(filepath.Join(opts.OutDir, "speed-test-report.csv"), speedResults); err != nil {
-		return fmt.Errorf("write speed-test report: %w", err)
+	for _, node := range speedResults {
+		if node.OoklaTested && !node.OoklaPassed {
+			stage := "OOKLA"
+			if node.CloudflareTested && node.CloudflarePassed {
+				stage = "CLOUDFLARE RECOVERY"
+			}
+			reason := node.OoklaError
+			if reason == "" {
+				reason = "Ookla test failed"
+			}
+			failures.AddNode(stage, node, reason)
+		}
+		if node.CloudflareTested && !node.CloudflarePassed {
+			reason := node.CloudflareError
+			if reason == "" {
+				reason = "Cloudflare fallback failed"
+			}
+			failures.AddNode("CLOUDFLARE", node, reason)
+		}
+		if node.RenameError != "" {
+			failures.AddNode("RENAME", node, node.RenameError)
+		}
+	}
+	if err := writeStageFiles(opts.OutDir, "speedtested", speedPassed, true); err != nil {
+		return err
 	}
 	if opts.CloudflareFallback {
 		ooklaPassed := filterNodes(speedResults, func(n sub.Node) bool { return n.OoklaTested && n.OoklaPassed })
@@ -546,11 +612,25 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		}
 		live(*n, detail)
 	}, nil)
+	for _, node := range serviceResults {
+		if node.ServiceError != "" {
+			failures.AddNode("SERVICE CHECK", node, node.ServiceError)
+		} else if !geminiAvailable(node) {
+			reason := strings.TrimSpace(node.GeminiStatus)
+			if node.GeminiNote != "" {
+				reason += ": " + node.GeminiNote
+			}
+			if reason == "" {
+				reason = "Gemini was not classified as available"
+			}
+			failures.AddNode("GEMINI", node, reason)
+		}
+	}
 	finalCandidates := filterNodes(serviceResults, func(n sub.Node) bool { return geminiAvailable(n) })
 	// Each node is tested exactly once per enabled stage: URL, speed, then Gemini.
 	// There is deliberately no final recheck stage; it duplicated URL and Gemini requests.
 	finalNodes := finalCandidates
-	if err := writeGeminiResults(opts.OutDir, finalNodes, parsed, urlPassed, speedPassed, opts.GeminiFile); err != nil {
+	if err := writeGeminiResults(opts.OutDir, finalNodes, parsed, urlPassed, speedPassed, false); err != nil {
 		return err
 	}
 
@@ -561,13 +641,14 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 	printSubscriptionQualitySummary(stdout, sources, perSourceEligible, urlPassed, speedPassed, finalNodes)
 	fmt.Fprintf(stdout, "Output directory: %s\n", opts.OutDir)
-	if opts.GeminiFile {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speed-test-finished*.txt, speed-test-report.csv, cloudflare-fallback-finished*.txt (when enabled), gemini.txt and gemini-*.txt")
-	} else {
-		fmt.Fprintln(stdout, "Output: all.txt, url-test-finished*.txt, speed-test-finished*.txt, speed-test-report.csv, cloudflare-fallback-finished*.txt (when enabled); Gemini-available nodes are marked with 'Gemini 🐱' in every applicable file")
+	if err := failures.Write(filepath.Join(opts.OutDir, "failed.txt")); err != nil {
+		return fmt.Errorf("write failure log: %w", err)
 	}
+	fmt.Fprintf(stdout, "Failure log: %d entries -> %s\n", failures.Count(), filepath.Join(opts.OutDir, "failed.txt"))
+	fmt.Fprintln(stdout, "Output: all.txt, url-tested*.txt, speedtested*.txt, failed.txt")
 	if opts.RemoteUpload.Enabled {
 		if uploadErr := uploadOutput(ctx, opts.RemoteUpload, opts.OutDir, stdout, stderr); uploadErr != nil {
+			failures.Add("UPLOAD", uploadErr.Error())
 			fmt.Fprintf(stderr, "[UPLOAD] ERROR: %v\n", uploadErr)
 		} else {
 			fmt.Fprintln(stdout, "[UPLOAD] Finished without reported errors")
@@ -648,7 +729,7 @@ func loadSourcesWithFetcherProgress(ctx context.Context, path string, timeout ti
 			return sources, err
 		}
 		entry := item.text
-		source := loadedSource{Reference: entry, Line: item.line}
+		source := loadedSource{Reference: entry, Line: item.line, ListPath: path}
 		phase := "reading local file"
 		if strings.HasPrefix(entry, "http://") || strings.HasPrefix(entry, "https://") {
 			phase = "downloading"
@@ -892,7 +973,11 @@ func sourceSummaryLabel(source loadedSource) string {
 		label = filepath.Clean(source.Reference)
 	}
 	if source.Line > 0 {
-		return fmt.Sprintf("%s [sources.txt:%d]", label, source.Line)
+		listName := filepath.Base(source.ListPath)
+		if listName == "" || listName == "." {
+			listName = "sources.txt"
+		}
+		return fmt.Sprintf("%s [%s:%d]", label, listName, source.Line)
 	}
 	return label
 }
@@ -904,18 +989,26 @@ func sourceStageRate(passed, tested int) string {
 	return fmt.Sprintf("%d/%d (%.1f%%)", passed, tested, 100*float64(passed)/float64(tested))
 }
 
-// buildSubscriptionSourceStats attributes each globally tested node to every
-// source that contains it, but separates source-exclusive nodes from nodes
-// shared by multiple sources. A shared node is tested only once globally and
-// is never presented as an exclusive contribution of any source.
+const (
+	stageSnapshotEvery    = 100
+	stageSnapshotInterval = 5 * time.Second
+)
+
+func shouldRefreshStageSnapshot(completed int, now, last time.Time) bool {
+	return completed >= stageSnapshotEvery || now.Sub(last) >= stageSnapshotInterval
+}
+
+// buildSubscriptionSourceStats globally deduplicates each source before attribution.
+// Shared configs are counted once in the global shared funnel and are never added
+// to any source's independent contribution.
 func buildSubscriptionSourceStats(
 	sources []loadedSource,
 	perSourceNodes [][]sub.Node,
 	urlPassed, speedPassed, geminiAvailable []sub.Node,
-) ([]sourceQualityStats, int, int, int) {
+) ([]sourceQualityStats, sourceQualityTotals) {
 	perSourceKeys := make([][]string, len(sources))
 	membership := make(map[string]int)
-	sourceAppearances := 0
+	totals := sourceQualityTotals{}
 
 	for sourceIndex := range sources {
 		if sourceIndex >= len(perSourceNodes) {
@@ -930,25 +1023,37 @@ func buildSubscriptionSourceStats(
 			seen[key] = struct{}{}
 			perSourceKeys[sourceIndex] = append(perSourceKeys[sourceIndex], key)
 			membership[key]++
-			sourceAppearances++
+			totals.SourceAppearances++
 		}
 	}
 
+	totals.GlobalUnique = len(membership)
 	urlKeys := nodeKeySet(urlPassed)
 	speedKeys := nodeKeySet(speedPassed)
 	geminiKeys := nodeKeySet(geminiAvailable)
-	stats := make([]sourceQualityStats, len(sources))
-	sharedUnique := 0
-	for _, count := range membership {
-		if count > 1 {
-			sharedUnique++
+	for key, sourceCount := range membership {
+		_, urlOK := urlKeys[key]
+		_, speedOK := speedKeys[key]
+		_, geminiOK := geminiKeys[key]
+		if sourceCount > 1 {
+			totals.SharedUnique++
+			if urlOK { totals.SharedURLPassed++ }
+			if speedOK { totals.SharedSpeedPassed++ }
+			if geminiOK { totals.SharedGemini++ }
+		} else {
+			totals.ExclusiveUnique++
+			if urlOK { totals.ExclusiveURLPassed++ }
+			if speedOK { totals.ExclusiveSpeedPassed++ }
+			if geminiOK { totals.ExclusiveGemini++ }
 		}
 	}
 
+	stats := make([]sourceQualityStats, len(sources))
 	for sourceIndex, source := range sources {
 		item := sourceQualityStats{
 			Reference: source.Reference,
 			Line: source.Line,
+			ListPath: source.ListPath,
 			Eligible: len(perSourceKeys[sourceIndex]),
 		}
 		switch {
@@ -980,21 +1085,23 @@ func buildSubscriptionSourceStats(
 		stats[sourceIndex] = item
 	}
 
-	// Rank by independently discovered URL-passed configs, not by popular
-	// configs copied into many subscriptions. Break ties by exclusive pass
-	// rate, then by the number of exclusive configs; preserve source order last.
+	// Rank by new, source-exclusive speed-passed configs. Shared results are
+	// excluded because the same config can appear in multiple subscriptions.
 	sort.SliceStable(stats, func(i, j int) bool {
 		a, b := stats[i], stats[j]
+		if a.ExclusiveSpeedPassed != b.ExclusiveSpeedPassed {
+			return a.ExclusiveSpeedPassed > b.ExclusiveSpeedPassed
+		}
 		if a.ExclusiveURLPassed != b.ExclusiveURLPassed {
 			return a.ExclusiveURLPassed > b.ExclusiveURLPassed
 		}
 		aRate, bRate := 0.0, 0.0
-		if a.Exclusive > 0 { aRate = float64(a.ExclusiveURLPassed) / float64(a.Exclusive) }
-		if b.Exclusive > 0 { bRate = float64(b.ExclusiveURLPassed) / float64(b.Exclusive) }
+		if a.ExclusiveURLPassed > 0 { aRate = float64(a.ExclusiveSpeedPassed) / float64(a.ExclusiveURLPassed) }
+		if b.ExclusiveURLPassed > 0 { bRate = float64(b.ExclusiveSpeedPassed) / float64(b.ExclusiveURLPassed) }
 		if aRate != bRate { return aRate > bRate }
 		return a.Exclusive > b.Exclusive
 	})
-	return stats, sourceAppearances, len(membership), sharedUnique
+	return stats, totals
 }
 
 func printSubscriptionQualitySummary(
@@ -1003,37 +1110,42 @@ func printSubscriptionQualitySummary(
 	perSourceNodes [][]sub.Node,
 	urlPassed, speedPassed, geminiAvailable []sub.Node,
 ) {
-	stats, sourceAppearances, globallyUnique, sharedUnique := buildSubscriptionSourceStats(
+	stats, totals := buildSubscriptionSourceStats(
 		sources, perSourceNodes, urlPassed, speedPassed, geminiAvailable,
 	)
-	fmt.Fprintln(w, "\nSubscription source quality (shared configs are shown separately):")
-	fmt.Fprintf(w, "Enabled configs across sources: %d unique source entries -> %d globally unique | %d repeated appearances | %d configs occur in multiple sources\n",
-		sourceAppearances, globallyUnique, sourceAppearances-globallyUnique, sharedUnique,
+	fmt.Fprintln(w, "\nSubscription source quality:")
+	fmt.Fprintf(w, "Source occurrences: %d | globally unique enabled configs: %d | repeated appearances: %d | configs shared by sources: %d\n",
+		totals.SourceAppearances, totals.GlobalUnique, totals.SourceAppearances-totals.GlobalUnique, totals.SharedUnique,
 	)
+	fmt.Fprintf(w, "Source-exclusive (%d): URL %s -> speed %s -> Gemini %s\n",
+		totals.ExclusiveUnique,
+		sourceStageRate(totals.ExclusiveURLPassed, totals.ExclusiveUnique),
+		sourceStageRate(totals.ExclusiveSpeedPassed, totals.ExclusiveURLPassed),
+		sourceStageRate(totals.ExclusiveGemini, totals.ExclusiveSpeedPassed),
+	)
+	fmt.Fprintf(w, "Shared globally (%d, counted once): URL %s -> speed %s -> Gemini %s\n",
+		totals.SharedUnique,
+		sourceStageRate(totals.SharedURLPassed, totals.SharedUnique),
+		sourceStageRate(totals.SharedSpeedPassed, totals.SharedURLPassed),
+		sourceStageRate(totals.SharedGemini, totals.SharedSpeedPassed),
+	)
+	fmt.Fprintln(w, "Sources ranked by new speed-passed configs (exclusive only):")
 	for rank, item := range stats {
-		label := sourceSummaryLabel(loadedSource{Reference: item.Reference, Line: item.Line})
+		label := sourceSummaryLabel(loadedSource{Reference: item.Reference, Line: item.Line, ListPath: item.ListPath})
 		status := ""
 		if item.Status != "" { status = " [" + item.Status + "]" }
-		fmt.Fprintf(w, "%2d. %s%s\n", rank+1, label, status)
-		fmt.Fprintf(w, "    configs: %d enabled unique | %d only here | %d shared\n", item.Eligible, item.Exclusive, item.Shared)
-		fmt.Fprintf(w, "    URL:    only here %s | shared %s\n",
+		fmt.Fprintf(w, "%2d. %s | only here %d | URL %s | speed %s | Gemini %s%s\n",
+			rank+1, label, item.Exclusive,
 			sourceStageRate(item.ExclusiveURLPassed, item.Exclusive),
-			sourceStageRate(item.SharedURLPassed, item.Shared),
-		)
-		fmt.Fprintf(w, "    speed:  only here %s | shared %s (of URL-passed)\n",
 			sourceStageRate(item.ExclusiveSpeedPassed, item.ExclusiveURLPassed),
-			sourceStageRate(item.SharedSpeedPassed, item.SharedURLPassed),
-		)
-		fmt.Fprintf(w, "    Gemini: only here %s | shared %s (of speed-passed)\n",
 			sourceStageRate(item.ExclusiveGemini, item.ExclusiveSpeedPassed),
-			sourceStageRate(item.SharedGemini, item.SharedSpeedPassed),
+			status,
 		)
 	}
 	if len(stats) == 0 {
 		fmt.Fprintln(w, "  No subscription sources")
 	}
 }
-
 func deduplicate(nodes []sub.Node) ([]sub.Node, int) {
 	seen := map[string]bool{}
 	out := make([]sub.Node, 0, len(nodes))
@@ -1932,7 +2044,8 @@ func writeStageFiles(dir, base string, nodes []sub.Node, split bool) error {
 // from older versions must not survive a new run.
 func cleanOutputArtifacts(dir string) error {
 	known := []string{
-		"all.txt", "invalid.txt", "unique.txt", "selected.txt", "url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
+		"all.txt", "failed.txt", "invalid.txt", "unique.txt", "selected.txt", "url-tested.txt", "speedtested.txt",
+		"url-test-finished.txt", "url-test-failed.txt", "url-test-failures.txt",
 		"speed-test-finished.txt", "speed-test-report.csv", "cloudflare-fallback-finished.txt", "speedtest-finished.txt", "speedtest-failed.txt", "tested.txt", "service-check-results.txt",
 		"final.txt", "gemini-available.txt", "gemini.txt", "report.csv",
 		"all.json", "unique.json", "selected.json", "url-test-finished.json", "url-test-failed.json",
@@ -1966,9 +2079,8 @@ func cleanOutputArtifacts(dir string) error {
 
 const geminiNameSuffix = " Gemini 🐱"
 
-// writeGeminiResults exports Gemini-available nodes separately when enabled.
-// When disabled, it marks those nodes and refreshes every earlier stage list so
-// the marker is present wherever the same node appears.
+// writeGeminiResults optionally supports the legacy separate-file mode.
+// The current Run pipeline always uses inline name markers to keep output compact.
 func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes []sub.Node, separateFile bool) error {
 	if err := markGeminiNodes(geminiNodes); err != nil {
 		return err
@@ -1991,10 +2103,10 @@ func writeGeminiResults(dir string, geminiNodes, allNodes, urlNodes, speedNodes 
 	if err := writeSubscription(filepath.Join(dir, "all.txt"), allNodes); err != nil {
 		return err
 	}
-	if err := writeStageFiles(dir, "url-test-finished", urlNodes, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", urlNodes, true); err != nil {
 		return err
 	}
-	return writeStageFiles(dir, "speed-test-finished", speedNodes, true)
+	return writeStageFiles(dir, "speedtested", speedNodes, true)
 }
 
 func markGeminiNodes(nodes []sub.Node) error {
@@ -2042,6 +2154,7 @@ func applyNodeUpdatesByIdentity(nodes, updates []sub.Node) {
 func removeLegacyJSONArtifacts(dir string) error {
 	bases := []string{
 		"all", "unique", "selected",
+		"url-tested", "speedtested",
 		"url-test-finished", "url-test-failed",
 		"speed-test-finished", "speedtest-failed", "tested",
 		"service-check-results", "final",

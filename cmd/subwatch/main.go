@@ -17,7 +17,7 @@ import (
 	"github.com/negr666omg/subwatch/internal/app"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -117,6 +117,13 @@ func runCommand(args []string) error {
 	}
 	opts, err := app.LoadOptions(*config)
 	if err != nil {
+		failureDir := strings.TrimSpace(*out)
+		if failureDir == "" {
+			failureDir = opts.OutDir
+		}
+		if logErr := app.RecordStartupFailure(failureDir, "CONFIG", err); logErr != nil {
+			fmt.Fprintf(os.Stderr, "failed to write failure log: %v\n", logErr)
+		}
 		return err
 	}
 	if configMissing {

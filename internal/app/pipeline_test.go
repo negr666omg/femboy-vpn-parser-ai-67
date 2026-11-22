@@ -124,9 +124,9 @@ func TestDefaultSourceTimeout(t *testing.T) {
 	}
 }
 
-func TestDefaultGeminiFileEnabled(t *testing.T) {
-	if !DefaultOptions().GeminiFile {
-		t.Fatal("separate Gemini output should remain enabled by default")
+func TestDefaultGeminiFileDisabled(t *testing.T) {
+	if DefaultOptions().GeminiFile {
+		t.Fatal("Gemini results should use inline name markers, not separate files")
 	}
 }
 
@@ -143,6 +143,10 @@ func TestIsolatedSourceDownloadsRequireExplicitInterface(t *testing.T) {
 	opts.OutDir = filepath.Join(dir, "out")
 	if err := Run(context.Background(), opts, &bytes.Buffer{}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "network.interface") {
 		t.Fatalf("expected explicit interface validation error at run time, got %v", err)
+	}
+	failureLog, readErr := os.ReadFile(filepath.Join(opts.OutDir, "failed.txt"))
+	if readErr != nil || !strings.Contains(string(failureLog), "network.isolate_source_downloads requires network.interface") {
+		t.Fatalf("fatal run error was not recorded in failed.txt: %q, %v", failureLog, readErr)
 	}
 }
 
@@ -418,8 +422,8 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 		base  string
 		nodes []sub.Node
 	}{
-		{"url-test-finished", urlNodes},
-		{"speed-test-finished", speedNodes},
+		{"url-tested", urlNodes},
+		{"speedtested", speedNodes},
 		{"gemini", geminiNodes},
 	} {
 		if err := writeStageFiles(dir, item.base, item.nodes, true); err != nil {
@@ -427,10 +431,10 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 		}
 	}
 	for name, want := range map[string]string{
-		"url-test-finished-vless.txt": "vless://url-one\n",
-		"url-test-finished-ss.txt": "ss://url-two\n",
-		"speed-test-finished.txt": "vless://speed-one\n",
-		"speed-test-finished-vless.txt": "vless://speed-one\n",
+		"url-tested-vless.txt": "vless://url-one\n",
+		"url-tested-ss.txt": "ss://url-two\n",
+		"speedtested.txt": "vless://speed-one\n",
+		"speedtested-vless.txt": "vless://speed-one\n",
 		"gemini.txt": "ss://gemini-one\n",
 		"gemini-ss.txt": "ss://gemini-one\n",
 	} {
@@ -444,10 +448,10 @@ func TestStageProtocolFilesUseStagePrefixes(t *testing.T) {
 			t.Fatalf("legacy unqualified protocol file %s exists: %v", legacy, err)
 		}
 	}
-	if err := writeStageFiles(dir, "url-test-finished", []sub.Node{{Protocol: "ss", URI: "ss://only"}}, true); err != nil {
+	if err := writeStageFiles(dir, "url-tested", []sub.Node{{Protocol: "ss", URI: "ss://only"}}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "url-test-finished-vless.txt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "url-tested-vless.txt")); !os.IsNotExist(err) {
 		t.Fatal("stale URL protocol list remains")
 	}
 }
@@ -492,7 +496,7 @@ func TestGeminiDisabledMarksNodesInEveryApplicableFile(t *testing.T) {
 	if err := writeGeminiResults(dir, geminiNodes, parsed, urlNodes, speedNodes, false); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "url-test-finished.txt", "url-test-finished-vless.txt", "speed-test-finished.txt", "speed-test-finished-vless.txt"} {
+	for _, name := range []string{"all.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt"} {
 		data := string(mustRead(t, filepath.Join(dir, name)))
 		if !strings.Contains(data, "Gemini") {
 			t.Fatalf("%s did not receive Gemini marker: %q", name, data)
@@ -535,9 +539,9 @@ func TestRunStageCallbackRunsForEachCompletedNode(t *testing.T) {
 	}
 }
 
-func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
+func TestCleanOutputArtifactsRemovesOldAndNewGeneratedFilesButKeepsConfig(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"config.json", "all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
+	for _, name := range []string{"config.json", "all.txt", "failed.txt", "invalid.txt", "selected.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -545,7 +549,7 @@ func TestCleanOutputArtifactsRemovesOldStagesAndKeepsConfig(t *testing.T) {
 	if err := cleanOutputArtifacts(dir); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"all.txt", "selected.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
+	for _, name := range []string{"all.txt", "failed.txt", "invalid.txt", "selected.txt", "url-tested.txt", "url-tested-vless.txt", "speedtested.txt", "speedtested-vless.txt", "url-test-failed.txt", "final-vless.txt", "report.csv", "vless.txt", "gemini.txt", "gemini-available.txt"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("generated artifact %s remains: %v", name, err)
 		}
@@ -737,11 +741,14 @@ func TestBuildSubscriptionSourceStatsSeparatesExclusiveAndSharedNodes(t *testing
 	speedPassed := []sub.Node{{Key: "node-1"}, {Key: "shared"}}
 	geminiAvailable := []sub.Node{{Key: "shared"}}
 
-	stats, appearances, globallyUnique, sharedUnique := buildSubscriptionSourceStats(
+	stats, totals := buildSubscriptionSourceStats(
 		sources, perSource, urlPassed, speedPassed, geminiAvailable,
 	)
-	if appearances != 5 || globallyUnique != 4 || sharedUnique != 1 {
-		t.Fatalf("overlap totals = appearances:%d unique:%d shared:%d, want 5/4/1", appearances, globallyUnique, sharedUnique)
+	if totals.SourceAppearances != 5 || totals.GlobalUnique != 4 || totals.SharedUnique != 1 ||
+		totals.ExclusiveUnique != 3 || totals.ExclusiveURLPassed != 2 || totals.SharedURLPassed != 1 ||
+		totals.ExclusiveSpeedPassed != 1 || totals.SharedSpeedPassed != 1 ||
+		totals.ExclusiveGemini != 0 || totals.SharedGemini != 1 {
+		t.Fatalf("unexpected global source totals: %+v", totals)
 	}
 	byReference := make(map[string]sourceQualityStats, len(stats))
 	for _, item := range stats {
@@ -765,21 +772,22 @@ func TestBuildSubscriptionSourceStatsSeparatesExclusiveAndSharedNodes(t *testing
 
 func TestPrintSubscriptionQualitySummaryRanksByExclusiveResultsAndRedactsURLSecrets(t *testing.T) {
 	sources := []loadedSource{
-		{Reference: "https://user:secret@source-a.example/sub?token=hidden", Line: 1},
-		{Reference: "https://source-b.example/sub?token=also-hidden", Line: 2},
+		{Reference: "https://user:secret@source-a.example/sub?token=hidden", Line: 1, ListPath: "feeds.list"},
+		{Reference: "https://source-b.example/sub?token=also-hidden", Line: 2, ListPath: "feeds.list"},
 	}
 	perSource := [][]sub.Node{
-		{{Key: "a-only"}, {Key: "shared"}},
-		{{Key: "b-only-1"}, {Key: "b-only-2"}, {Key: "shared"}},
+		{{Key: "a-only-1"}, {Key: "a-only-2"}, {Key: "shared"}},
+		{{Key: "b-only"}, {Key: "shared"}},
 	}
-	urlPassed := []sub.Node{{Key: "a-only"}, {Key: "b-only-1"}, {Key: "b-only-2"}, {Key: "shared"}}
+	urlPassed := []sub.Node{{Key: "a-only-1"}, {Key: "a-only-2"}, {Key: "b-only"}, {Key: "shared"}}
+	speedPassed := []sub.Node{{Key: "b-only"}}
 	var output bytes.Buffer
-	printSubscriptionQualitySummary(&output, sources, perSource, urlPassed, nil, nil)
+	printSubscriptionQualitySummary(&output, sources, perSource, urlPassed, speedPassed, nil)
 	got := output.String()
-	first := strings.Index(got, "1. source-b.example [sources.txt:2]")
-	second := strings.Index(got, "2. source-a.example [sources.txt:1]")
+	first := strings.Index(got, "1. source-b.example [feeds.list:2]")
+	second := strings.Index(got, "2. source-a.example [feeds.list:1]")
 	if first < 0 || second <= first {
-		t.Fatalf("sources should rank by exclusive URL-passed configs, not copied shared configs:\n%s", got)
+		t.Fatalf("sources should rank by exclusive speed-passed configs, not copied shared configs:\n%s", got)
 	}
 	for _, secret := range []string{"user:secret", "token=hidden", "also-hidden"} {
 		if strings.Contains(got, secret) {
@@ -787,12 +795,53 @@ func TestPrintSubscriptionQualitySummaryRanksByExclusiveResultsAndRedactsURLSecr
 		}
 	}
 	for _, want := range []string{
-		"5 unique source entries -> 4 globally unique",
-		"configs: 3 enabled unique | 2 only here | 1 shared",
-		"URL:    only here 2/2 (100.0%) | shared 1/1 (100.0%)",
+		"Source occurrences: 5 | globally unique enabled configs: 4 | repeated appearances: 1 | configs shared by sources: 1",
+		"Source-exclusive (3): URL 3/3 (100.0%) -> speed 1/3 (33.3%)",
+		"Shared globally (1, counted once): URL 1/1 (100.0%)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("summary missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestShouldRefreshStageSnapshot(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if shouldRefreshStageSnapshot(stageSnapshotEvery-1, base.Add(time.Second), base) {
+		t.Fatal("snapshot refreshed too early")
+	}
+	if !shouldRefreshStageSnapshot(stageSnapshotEvery, base.Add(time.Second), base) {
+		t.Fatal("snapshot should refresh after the configured config count")
+	}
+	if !shouldRefreshStageSnapshot(1, base.Add(stageSnapshotInterval), base) {
+		t.Fatal("snapshot should refresh after the configured time interval")
+	}
+}
+
+func TestRunFailureLogCombinesStagesAndRedactsCredentials(t *testing.T) {
+	log := newRunFailureLog()
+	log.AddNode("URL TEST", sub.Node{
+		Name: "edge node", Protocol: "vless",
+		URI: "vless://uuid:password@example.test:443?security=tls",
+	}, "connection timeout")
+	log.Add("PARSER", "unsupported subscription entry: "+redactFailureInput("vless://uuid:password@example.test:443?token=secret"))
+	path := filepath.Join(t.TempDir(), "failed.txt")
+	if err := log.Write(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	for _, want := range []string{"[URL TEST]", "[PARSER]", "edge node", "example.test", "connection timeout", "Entries: 2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failure log missing %q:\n%s", want, got)
+		}
+	}
+	for _, secret := range []string{"uuid", "password", "token=secret"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("failure log leaked %q:\n%s", secret, got)
 		}
 	}
 }

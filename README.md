@@ -1,11 +1,11 @@
-# SubWatch 0.4.0
+# SubWatch 0.5.0
 
 Linux-first Go CLI for parsing and deduplicating VLESS/VMess/Trojan/Shadowsocks/Hysteria2/TUIC/SOCKS/HTTP subscription links, then testing them through sing-box.
 
 ## Build from source
 
 ```bash
-tar -xzf subwatch-source-0.3.8.tar.gz -C subwatch-source
+tar -xzf subwatch-source-0.5.0.tar.gz -C subwatch-source
 cd subwatch-source
 go test ./...
 go vet ./...
@@ -27,14 +27,14 @@ When `config.json` does not exist, `sw run` creates it automatically with editab
 
 ## Processing pipeline — one pass per stage
 
-1. Parse every source and write `all.txt` (all parsed proxy URIs, including duplicates).
-2. Deduplicate in memory and apply the enabled-protocol filter. These are internal working sets and are not exported.
-3. URL-test every selected unique node. As soon as a node passes, SubWatch atomically updates `url-test-finished.txt` and the matching protocol file (for example, `url-test-finished-vless.txt`). These files contain only URL-test-passed nodes and grow during the URL-test stage.
-4. After the complete URL-test barrier, speed-test only URL successes. Both download and upload must meet their configured minimums. Write `speed-test-finished.txt` and per-protocol files such as `speed-test-finished-vless.txt`.
-5. After the complete speed-test barrier, check Gemini only for speed-test successes. With `output.gemini_file: true`, write `gemini.txt` and matching protocol files such as `gemini-vless.txt`, containing only nodes classified as `available`. With the setting disabled, do not create separate Gemini files; instead append `Gemini 🐱` to each available node's remark in `all.txt`, `url-test-finished*.txt` and `speed-test-finished*.txt`, including their protocol-specific lists.
-6. At the end of the run, print a source-quality breakdown. Each source separates configs found only there from configs shared with other sources. URL, speed and Gemini pass rates are shown separately for those two groups; speed success is measured among URL-passed configs, and Gemini success among speed-passed configs. Sources are ranked by the number of source-exclusive URL-passed configs, so copied configs cannot inflate a source's ranking. The summary also reports global cross-source overlap. Config identity is based on normalized connection settings, not display names, so renamed copies still match. Source URLs are displayed without credentials, paths or query tokens.
+1. Parse all subscription sources and write `all.txt`. It is the raw combined list of every supported parsed node, before global deduplication and protocol filtering; duplicate appearances are intentionally retained.
+2. Deduplicate globally in memory and apply `protocols.enabled`. These are internal working sets and are not exported.
+3. URL-test every selected unique node. Successful nodes are written to `url-tested.txt` and `url-tested-<protocol>.txt`. While the stage is running, these files refresh every 5 seconds or after 100 completed configs, whichever comes first; they are written again at stage completion.
+4. After all URL tests finish, speed-test only URL successes. Both download and upload must meet their configured minimums. Passing nodes are written to `speedtested.txt` and `speedtested-<protocol>.txt`. A node rescued by the optional Cloudflare fallback is included in these same files.
+5. After all speed tests finish, check Gemini only for speed-tested nodes. Available nodes receive the `Gemini 🐱` marker in their name in `all.txt`, `url-tested*.txt` and `speedtested*.txt`; no separate Gemini files are created.
+6. The final source-quality summary reports global source overlap and two separate funnels: configs exclusive to one source, and configs shared across sources (counted once globally). Each source is ranked by the number of new, source-exclusive configs that passed the speed test. Per-source rows show exclusive URL, speed and Gemini conversion rates; shared appearances are not double-counted in the global totals. Config identity is based on normalized connection settings, not display names, so renamed copies still match. Source links are displayed without credentials, paths or query tokens.
 
-All result lists are plain-text files, one entry per line. `invalid.txt` contains only malformed or unsupported proxy entries rejected during parsing; nodes that parse successfully but fail URL or speed tests are not considered invalid configs. Failed-stage lists, temporary `selected`/`unique` lists, duplicate `tested` lists, service diagnostics and CSV reports are not exported. The output directory is cleaned of SubWatch-generated artifacts at the start of each run so stale files from older versions do not remain. Each invocation still performs one pass only; continuous/infinite cycling is not enabled.
+All subscription files are plain-text URI lists, one entry per line. `failed.txt` is the single diagnostic log: it includes malformed or unsupported input, source download/parse failures, URL and speed test failures, provider/fallback errors, Gemini/service errors, renaming problems and fatal program errors. Invalid URI credentials and URL query tokens are redacted from diagnostic entries. The output directory is cleaned of SubWatch-generated artifacts at the start of each run, so files from older versions do not linger.
 
 ## Live terminal status
 
@@ -51,12 +51,12 @@ See [`config.example.json`](./config.example.json). All settings are optional; d
 - `protocols.enabled`: protocols to test (`vless`, `vmess`, `trojan`, `ss`, `hysteria2`, `tuic`, `socks`, `http`). Aliases `shadowsocks`, `hy2`, and `socks5` are accepted.
 - `url_test`: URL used for the reachability check, concurrency, and timeout.
 - `speed_test.provider`: primary speed-test backend, either `cloudflare` (default) or `ookla`. Ookla retrieves the public Speedtest.net server list through each tested node, probes up to 12 candidates in parallel through that same proxy, and selects the lowest-latency reachable server. Each direction runs for up to 8 seconds. The displayed live rate is calculated from bytes as they arrive; the final speed and pass/fail thresholds use the maximum rolling 2-second average. No server ID, API key, or separate Ookla CLI installation is needed.
-- `speed_test.cloudflare_fallback.enabled`: optional second test, valid when `provider` is `ookla`. When enabled, SubWatch first runs Ookla on every URL-passed config. Only configs that fail Ookla (connection/test error or download/upload below the configured minimum) are sent to Cloudflare. A Cloudflare pass rescues the config into the combined `speed-test-finished*.txt` results; a Cloudflare failure leaves it failed. Configs that pass Ookla are not tested again. The default is `false`.
+- `speed_test.cloudflare_fallback.enabled`: optional second test, valid when `provider` is `ookla`. When enabled, SubWatch first runs Ookla on every URL-passed config. Only configs that fail Ookla (connection/test error or download/upload below the configured minimum) are sent to Cloudflare. A Cloudflare pass rescues the config into the combined `speedtested*.txt` results; a Cloudflare failure leaves it failed. Configs that pass Ookla are not tested again. The default is `false`.
 - `speed_test`: concurrency, overall `timeout`, `max_duration`, and minimum download/upload Mbps are shared by both providers and the fallback. The Cloudflare-specific `first_byte_timeout`, `sample_interval`, `download_bytes`, `upload_bytes`, `download_url`, and `upload_url` values are used when Cloudflare is the primary provider or the Ookla fallback is enabled; they are ignored when Ookla runs alone. The Cloudflare provider reports the fastest observed sample interval. The download URL may contain `{bytes}`; the upload URL must accept a raw HTTP `POST` body and return 2xx.
-- `speed-test-report.csv` records each URL-passed node and keeps Ookla and Cloudflare tested/pass flags, download/upload Mbps, and errors in separate columns. `cloudflare-fallback-finished.txt` and its protocol-specific variants contain only configs rescued by the fallback. The combined `speed-test-finished*.txt` remains the list of nodes that passed the configured speed-testing pipeline.
+- `failed.txt` records provider-specific speed failures and fallback details. A node rescued by Cloudflare is also included in `speedtested*.txt`.
 - `service_check`: concurrency, timeout, optional exit-IP lookup, automatic node renaming, GeoIP endpoint, name template (`{flag}`, `{country}`, `{download}`, `{upload}`), country-name display mode and Mbps decimal precision. `country_format` accepts `full` (default, for example `🇨🇳 China`), `code` (`🇨🇳 CN`) or `none` (flag only, `🇨🇳`). The setting applies to both URL-stage and final node names. Existing templates that contain `{flag}` but omit `{country}` automatically get the selected country label inserted after the flag, except in `none` mode. If GeoIP is unavailable, the node is still renamed using `🌐 Unknown`. GeoIP requests always go through the tested proxy and use short, bounded fallbacks.
-- `output.directory`: output directory. Stage result files are always plain URI-only `.txt` files and are split by protocol, for example `url-test-finished-vless.txt`, `speed-test-finished-vless.txt` and `gemini-vless.txt`.
-- `output.gemini_file`: when `true` (default), create a separate `gemini.txt` plus `gemini-<protocol>.txt` lists. When `false`, do not create a Gemini-only file; instead rename Gemini-available nodes by appending `Gemini 🐱` to their remark and refresh all earlier files in which those nodes appear, including `all.txt` and both stage/protocol lists.
+- `output.directory`: output directory. URI-only results use `url-tested.txt`, `url-tested-<protocol>.txt`, `speedtested.txt` and `speedtested-<protocol>.txt`. The unified diagnostic report is `failed.txt`.
+- `output.gemini_file`: legacy compatibility setting. Separate Gemini files are no longer generated regardless of this value; Gemini-available nodes are marked inline with `Gemini 🐱` in every applicable result list.
 - `loop.interval`: pause between complete cycles in continuous mode. Uses Go duration syntax, such as `"60s"` or `"5m"`. The default `"0s"` starts the next cycle immediately. The pause begins after the cycle (including any SFTP upload) finishes, and Ctrl+C interrupts the wait.
 
 The default speed test uses 2 MiB download and 2 MiB upload payloads, a concurrency of 2, and minimums of 8 Mbps in both directions. **8 Mbps is approximately 1 MB/s.** Speed-test concurrency is deliberately lower than URL-test concurrency because simultaneous throughput tests share the machine's internet connection and can reduce measured rates. Set it to `1` for the least contention or increase it when throughput is ample.
@@ -76,17 +76,16 @@ For compatibility, an old `config.json` containing a `final_check` object is acc
 
 ## Output files
 
-The output directory contains only these result groups:
+The output directory has a deliberately small, predictable set of files:
 
-- `all.txt` — every parsed proxy URI from all sources (duplicates included).
-- `invalid.txt` — original non-empty, non-comment config lines rejected by the parser. This file is written even when no valid proxy nodes were found; URL-test and speed-test failures are not included.
-- `url-test-finished.txt` and `url-test-finished-<protocol>.txt` — all URL-test-passed nodes and their per-protocol subsets.
-- `speed-test-finished.txt` and `speed-test-finished-<protocol>.txt` — nodes that passed the configured speed-test pipeline (Ookla, Cloudflare, or either when fallback is enabled).
-- `speed-test-report.csv` — per-node CSV with independent Ookla and Cloudflare results, including failures and measured rates.
-- `cloudflare-fallback-finished.txt` and `cloudflare-fallback-finished-<protocol>.txt` — only nodes that failed Ookla but were rescued by Cloudflare; created when the fallback is enabled.
-- `gemini.txt` and `gemini-<protocol>.txt` — nodes classified as Gemini `available`, created when `output.gemini_file` is `true`. When it is `false`, Gemini availability is marked in the node name across all applicable earlier files instead.
+- `all.txt` — every parsed proxy URI from every source, before global deduplication and protocol filtering. Duplicates and protocols disabled for testing remain here. It is useful as a raw combined archive; the actual tests use a separate in-memory unique list.
+- `url-tested.txt` — all nodes that passed the URL reachability check.
+- `url-tested-<protocol>.txt` — the same URL-passed nodes split by protocol, for example `url-tested-vless.txt`.
+- `speedtested.txt` — nodes that passed the complete configured speed pipeline. Cloudflare-rescued nodes are included.
+- `speedtested-<protocol>.txt` — speed-passed nodes split by protocol, for example `speedtested-vless.txt`.
+- `failed.txt` — one human-readable log of rejected config lines, source load and parser errors, URL/speed/service failures, Ookla and Cloudflare fallback results, rename errors and fatal program errors. This is diagnostic output, not a subscription list.
 
-`selected` means the internal list after deduplication and filtering by `protocols.enabled`; it does not mean URL-test-passed or working. It is an intermediate implementation detail and is no longer written to disk. Failed lists, `unique.txt`, `tested.txt`, `final.txt`, service-check dumps and `report.csv` are intentionally omitted to keep the output directory minimal.
+There are no separate failed-node lists, invalid.txt, CSV reports, Cloudflare-only files or Gemini-only files. Gemini availability is marked in node names with `Gemini 🐱`. Protocol-specific files appear only for protocols that have results in that stage.
 
 The Gemini check classifies a public signed-out page response only. It does not authenticate or test account-specific eligibility. A proxy can still stop responding immediately after its one-time test, and the destination client may route traffic differently from SubWatch.
 
