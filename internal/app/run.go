@@ -1048,6 +1048,17 @@ func fetchHTTPSource(ctx context.Context, sourceURL string, timeout time.Duratio
 	return fetchHTTPSourceWithProxy(ctx, sourceURL, timeout, true)
 }
 
+// sourceFetcherForNamespace keeps source downloads on the normal host network
+// unless an isolated source namespace was explicitly created.
+func sourceFetcherForNamespace(namespace *core.NetworkNamespace, executable string) sourceFetcher {
+	if namespace == nil {
+		return fetchHTTPSource
+	}
+	return func(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
+		return fetchSourceInNamespace(ctx, namespace, executable, sourceURL, timeout)
+	}
+}
+
 // fetchHTTPSourceDirect deliberately ignores HTTP_PROXY/HTTPS_PROXY inherited
 // from the host: an isolated source download must use the namespace's own route.
 func fetchHTTPSourceDirect(ctx context.Context, sourceURL string, timeout time.Duration) ([]byte, error) {
