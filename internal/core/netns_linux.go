@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -255,29 +256,120 @@ func selectedInterfaceRoute(ctx context.Context, iface *net.Interface) (net.IP, 
 		return nil, "", "", fmt.Errorf("network interface %q has no usable global IPv4 address", iface.Name)
 	}
 
-	cmd := exec.CommandContext(ctx, "ip", "-4", "route", "show", "default", "dev", iface.Name)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, "", "", fmt.Errorf("inspect IPv4 default route through %s: %w: %s", iface.Name, err, strings.TrimSpace(string(out)))
-	}
-	gateway, source, err := parseDefaultRoute(string(out))
-	if err != nil {
-		// Some VPN/network managers keep the physical interface's gateway in
-		// a non-main table. Search all tables before declaring it unavailable.
-		allRoutes, routeErr := exec.CommandContext(ctx, "ip", "-4", "route", "show", "table", "all").CombinedOutput()
+	// Prefer iproute2's structured output. Text output varies across iproute2
+	// versions and can hide nexthop groups behind an nhid.
+	allJSON, jsonErr := exec.CommandContext(ctx, "ip", "-j", "-4", "route", "show", "table", "all").CombinedOutput()
+	if jsonErr == nil {
+		gateway, source, routeErr := parseJSONRouteForInterface(string(allJSON), iface.Name, true)
 		if routeErr == nil {
-			gateway, source, err = parseDefaultRouteForInterface(string(allRoutes), iface.Name)
+			return selectInterfaceAddress(addresses, source, iface.Name, gateway)
 		}
 	}
-	if err != nil {
-		return nil, "", "", fmt.Errorf("network interface %q has no IPv4 default route; connect it to a network with a gateway: %w", iface.Name, err)
+
+	// Resolve the actual next hop through the selected device. This also
+	// handles routes represented by nexthop IDs and multipath routes.
+	for _, addr := range addresses {
+		args := []string{"-j", "-4", "route", "get", "1.1.1.1", "from", addr.ip.String(), "oif", iface.Name}
+		out, routeErr := exec.CommandContext(ctx, "ip", args...).CombinedOutput()
+		if routeErr == nil {
+			gateway, source, parseErr := parseJSONRouteForInterface(string(out), iface.Name, false)
+			if parseErr == nil {
+				if source == "" {
+					source = addr.ip.String()
+				}
+				return selectInterfaceAddress(addresses, source, iface.Name, gateway)
+			}
+		}
 	}
+
+	// Compatibility fallback for older iproute2 builds without JSON support.
+	out, showErr := exec.CommandContext(ctx, "ip", "-4", "route", "show", "table", "all").CombinedOutput()
+	if showErr == nil {
+		gateway, source, routeErr := parseDefaultRouteForInterface(string(out), iface.Name)
+		if routeErr == nil {
+			return selectInterfaceAddress(addresses, source, iface.Name, gateway)
+		}
+	}
+	return nil, "", "", fmt.Errorf("cannot resolve an IPv4 route through interface %q: no default route or usable next hop was found (the interface must have a gateway or a point-to-point route)", iface.Name)
+}
+
+type ipRouteJSON struct {
+	Dst      string          `json:"dst"`
+	Gateway  string          `json:"gateway"`
+	Dev      string          `json:"dev"`
+	Prefsrc  string          `json:"prefsrc"`
+	Src      string          `json:"src"`
+	Nexthops []ipNexthopJSON `json:"nexthops"`
+}
+
+type ipNexthopJSON struct {
+	Gateway string `json:"gateway"`
+	Dev     string `json:"dev"`
+}
+
+func parseJSONRouteForInterface(raw, iface string, defaultOnly bool) (gateway, source string, err error) {
+	var routes []ipRouteJSON
+	if err := json.Unmarshal([]byte(raw), &routes); err != nil {
+		return "", "", fmt.Errorf("decode iproute2 JSON: %w", err)
+	}
+	for _, route := range routes {
+		if defaultOnly && route.Dst != "" && route.Dst != "default" {
+			continue
+		}
+		if route.Dev == iface {
+			gateway, source, err = validateRouteParts(route.Gateway, firstNonEmpty(route.Prefsrc, route.Src))
+			if err == nil {
+				return gateway, source, nil
+			}
+		}
+		for _, hop := range route.Nexthops {
+			if hop.Dev != iface {
+				continue
+			}
+			gateway, source, err = validateRouteParts(hop.Gateway, firstNonEmpty(route.Prefsrc, route.Src))
+			if err == nil {
+				return gateway, source, nil
+			}
+		}
+	}
+	return "", "", fmt.Errorf("no matching route for interface %s", iface)
+}
+
+func validateRouteParts(gateway, source string) (string, string, error) {
+	if gateway != "" {
+		ip := net.ParseIP(gateway)
+		if ip == nil || ip.To4() == nil {
+			return "", "", fmt.Errorf("invalid IPv4 gateway %q", gateway)
+		}
+	}
+	if source != "" {
+		ip := net.ParseIP(source)
+		if ip == nil || ip.To4() == nil {
+			return "", "", fmt.Errorf("invalid IPv4 source address %q", source)
+		}
+	}
+	return gateway, source, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func selectInterfaceAddress(addresses []struct {
+	ip     net.IP
+	prefix string
+}, source, iface, gateway string) (net.IP, string, string, error) {
 	for _, addr := range addresses {
 		if source == "" || addr.ip.Equal(net.ParseIP(source)) {
 			return addr.ip, addr.prefix, gateway, nil
 		}
 	}
-	return nil, "", "", fmt.Errorf("default route through %s selects source %s, but that address is not assigned to the interface", iface.Name, source)
+	return nil, "", "", fmt.Errorf("route through %s selects source %s, but that address is not assigned to the interface", iface, source)
 }
 
 func parseDefaultRouteForInterface(routes, iface string) (gateway, source string, err error) {
