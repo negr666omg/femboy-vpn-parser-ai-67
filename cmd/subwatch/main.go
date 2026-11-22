@@ -15,10 +15,9 @@ import (
 	"time"
 
 	"github.com/negr666omg/subwatch/internal/app"
-	"github.com/negr666omg/subwatch/internal/core"
 )
 
-const version = "0.5.7"
+const version = "0.5.8"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -63,20 +62,6 @@ func run(args []string) error {
 			return fmt.Errorf("__fetch-source does not accept positional arguments")
 		}
 		return app.FetchSourceCommand(*timeout)
-	case "__network-probe":
-		fs := flag.NewFlagSet("__network-probe", flag.ContinueOnError)
-		tcpTargets := fs.String("tcp-targets", "", "comma-separated proxy server:port endpoints")
-		timeout := fs.Duration("timeout", 12*time.Second, "preflight timeout")
-		if err := fs.Parse(args); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return nil
-			}
-			return err
-		}
-		if fs.NArg() != 0 {
-			return fmt.Errorf("__network-probe does not accept positional arguments")
-		}
-		return core.RunNetworkTCPProbe(*tcpTargets, *timeout, os.Stdout)
 	case "interfaces":
 		if len(args) > 0 {
 			return fmt.Errorf("interfaces does not accept options")
