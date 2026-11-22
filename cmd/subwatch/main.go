@@ -212,6 +212,7 @@ func runCommand(args []string) error {
 		return readErr
 	}
 	continuous := strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes")
+	stability := app.NewStabilityTracker()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cycle := 0
@@ -220,7 +221,7 @@ func runCommand(args []string) error {
 		if continuous {
 			fmt.Fprintf(os.Stdout, "\n========== CYCLE %d ==========\n", cycle)
 		}
-		err := app.Run(ctx, opts, os.Stdout, os.Stderr)
+		err := app.RunWithStability(ctx, opts, os.Stdout, os.Stderr, stability)
 		if ctx.Err() != nil {
 			fmt.Fprintln(os.Stdout, "\n[stop] Interrupted; exiting cleanly")
 			return nil
