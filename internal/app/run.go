@@ -312,6 +312,8 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 		sourceNamespace = ns
 		opts.NetworkNamespace = ns.Name
 		opts.NetworkNamespaceInterface = ns.HostInterface()
+			opts.NetworkNamespaceProxyIP = ns.ProxyIP
+			opts.NetworkNamespaceHostIP = ns.HostIP
 		defer sourceNamespace.Close()
 		fmt.Fprintf(stdout, "[network] remote subscription downloads isolated through %s\n", opts.Interface)
 	}
@@ -466,6 +468,8 @@ func RunWithStability(ctx context.Context, opts Options, stdout, stderr io.Write
 			defer ns.Close()
 			opts.NetworkNamespace = ns.Name
 			opts.NetworkNamespaceInterface = ns.HostInterface()
+			opts.NetworkNamespaceProxyIP = ns.ProxyIP
+			opts.NetworkNamespaceHostIP = ns.HostIP
 		}
 	}
 
@@ -2220,7 +2224,7 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 	// Proxy startup has its own readiness deadline in core.Start. The configured
 	// stage timeout applies only to the actual HTTP test, not to local process
 	// startup; otherwise slow startup silently shortens the network timeout.
-	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface)
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface, opts.NetworkNamespaceProxyIP, opts.NetworkNamespaceHostIP)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -2236,7 +2240,7 @@ func withNodeClient(parent context.Context, n sub.Node, opts Options, timeout ti
 // withNodeProxy exposes the local sing-box HTTP CONNECT endpoint so Gemini can
 // use Throne-compatible TLS/HTTP2 without changing the other test stages.
 func withNodeProxy(parent context.Context, n sub.Node, opts Options, timeout time.Duration, fn func(context.Context, string, *net.Dialer) error) error {
-	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface)
+	inst, err := core.Start(parent, opts.CorePath, n.Outbound, opts.Interface, opts.NetworkNamespace, opts.NetworkNamespaceInterface, opts.NetworkNamespaceProxyIP, opts.NetworkNamespaceHostIP)
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
