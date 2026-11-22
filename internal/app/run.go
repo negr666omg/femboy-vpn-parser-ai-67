@@ -444,6 +444,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		fetch = sourceFetcherForNamespace(nil, "")
 		fmt.Fprintln(stdout, "[network] remote subscription downloads use the host network (isolate_source_downloads=false)")
 	}
+	var sources []loadedSource
 	var err error
 	sources, err = loadSourcesWithFetcherProgress(ctx, opts.Sources, opts.SourceTimeout, fetch, renderSourceProgress, opts.RetryOnConnectionError)
 	if sourceProgressRendered {
