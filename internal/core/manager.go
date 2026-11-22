@@ -34,6 +34,7 @@ type Instance struct {
 	cmd      *exec.Cmd
 	done     chan error
 	tmpDir   string
+	stderr   *cappedLog
 }
 
 func FindOrDownload(binary string) (string, error) {
@@ -282,7 +283,7 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 		return nil, err
 	}
 	proxyAddress := fmt.Sprintf("%s:%d", listenAddr, port)
-	inst := &Instance{ProxyURL: "http://" + proxyAddress, Dialer: proxyDialer, cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir}
+	inst := &Instance{ProxyURL: "http://" + proxyAddress, Dialer: proxyDialer, cmd: cmd, done: make(chan error, 1), tmpDir: tmpDir, stderr: stderr}
 	go func() { inst.done <- cmd.Wait() }()
 	deadline := time.NewTimer(startupTimeout)
 	defer deadline.Stop()
@@ -335,6 +336,14 @@ func startWithRetries(ctx context.Context, binary string, outbound map[string]an
 		case <-ticker.C:
 		}
 	}
+}
+
+// Diagnostics returns the captured sing-box stderr output for a failed node test.
+func (i *Instance) Diagnostics() string {
+	if i == nil || i.stderr == nil {
+		return ""
+	}
+	return i.stderr.String()
 }
 
 func (i *Instance) Close() {
