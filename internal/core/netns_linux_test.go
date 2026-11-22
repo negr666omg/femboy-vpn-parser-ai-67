@@ -93,6 +93,22 @@ func TestNetworkFullyCoveredByRoute(t *testing.T) {
 	}
 }
 
+func TestSplitDefaultRoutesDoNotReservePrivateSubnetPools(t *testing.T) {
+	_, pool, _ := net.ParseCIDR("172.16.0.0/16")
+	_, zeroHalf, _ := net.ParseCIDR("0.0.0.0/1")
+	_, oneHalf, _ := net.ParseCIDR("128.0.0.0/1")
+	_, defaultRoute, _ := net.ParseCIDR("0.0.0.0/0")
+	routes := []*net.IPNet{zeroHalf, oneHalf, defaultRoute}
+
+	if networkFullyCoveredByRoute(pool, routes) {
+		t.Fatal("split-default routes must not make an otherwise free /16 pool appear occupied")
+	}
+	_, candidate, _ := net.ParseCIDR("172.16.12.0/30")
+	if overlapsAnyRoute(candidate, routes) {
+		t.Fatal("split-default routes must not reject a /30 veth subnet")
+	}
+}
+
 func TestOverlapsAnyRouteRejectsOnlyCollidingSubnet(t *testing.T) {
 	_, lan, _ := net.ParseCIDR("192.168.1.0/24")
 	_, candidateInside, _ := net.ParseCIDR("192.168.1.4/30")
