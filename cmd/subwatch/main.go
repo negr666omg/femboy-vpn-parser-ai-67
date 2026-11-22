@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/negr666omg/subwatch/internal/app"
+	"github.com/negr666omg/subwatch/internal/core"
 )
 
 const version = "0.5.8"
@@ -62,6 +63,11 @@ func run(args []string) error {
 			return fmt.Errorf("__fetch-source does not accept positional arguments")
 		}
 		return app.FetchSourceCommand(*timeout)
+	case "cleanup":
+		if len(args) != 0 {
+			return fmt.Errorf("cleanup does not accept options")
+		}
+		return core.CleanupNetworkIsolation(os.Stdout)
 	case "interfaces":
 		if len(args) > 0 {
 			return fmt.Errorf("interfaces does not accept options")
@@ -70,7 +76,7 @@ func run(args []string) error {
 	case "run":
 		return runCommand(args)
 	default:
-		return fmt.Errorf("unknown command %q (use run, init, interfaces, version)", command)
+		return fmt.Errorf("unknown command %q (use run, init, cleanup, interfaces, version)", command)
 	}
 }
 
