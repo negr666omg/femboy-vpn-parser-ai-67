@@ -49,6 +49,21 @@ type Options struct {
 	WriteText          bool
 	LookupIP           bool
 	RemoteUpload       RemoteUploadOptions
+	GamingQuality      GamingQualityOptions
+}
+
+type GamingQualityOptions struct {
+	Enabled                 bool
+	Concurrency             int
+	Timeout                 time.Duration
+	LatencySamples          int
+	SampleInterval          time.Duration
+	DownloadBytes           int64
+	UploadBytes             int64
+	MaxLatencyMS            float64
+	MaxJitterMS             float64
+	MaxLoadedLatencyMS      float64
+	MaxLoadedJitterMS       float64
 }
 
 type RemoteUploadOptions struct {
@@ -101,6 +116,19 @@ type fileConfig struct {
 		MaxDuration string `json:"max_duration"`
 		SampleInterval string `json:"sample_interval"`
 	} `json:"speed_test"`
+	GamingTest struct {
+		Enabled            bool     `json:"enabled"`
+		Concurrency        int      `json:"concurrency"`
+		Timeout            string   `json:"timeout"`
+		LatencySamples     int      `json:"latency_samples"`
+		SampleInterval     string   `json:"sample_interval"`
+		DownloadBytes      int64    `json:"download_bytes"`
+		UploadBytes        int64    `json:"upload_bytes"`
+		MaxLatencyMS       *float64 `json:"max_latency_ms"`
+		MaxJitterMS        *float64 `json:"max_jitter_ms"`
+		MaxLoadedLatencyMS *float64 `json:"max_loaded_latency_ms"`
+		MaxLoadedJitterMS  *float64 `json:"max_loaded_jitter_ms"`
+	} `json:"gaming_test"`
 	ServiceCheck struct {
 		Concurrency int    `json:"concurrency"`
 		Timeout     string `json:"timeout"`
@@ -145,6 +173,13 @@ func DefaultOptions() Options {
 		SpeedUploadURL:   "https://speed.cloudflare.com/__up",
 		DownloadBytes:    2 << 20, UploadBytes: 2 << 20,
 		MinDownload: 8, MinUpload: 8, WriteText: true,
+		GamingQuality: GamingQualityOptions{
+			Enabled: false, Concurrency: 1, Timeout: 90 * time.Second,
+			LatencySamples: 12, SampleInterval: 250 * time.Millisecond,
+			DownloadBytes: 16 << 20, UploadBytes: 8 << 20,
+			MaxLatencyMS: 50, MaxJitterMS: 10,
+			MaxLoadedLatencyMS: 80, MaxLoadedJitterMS: 15,
+		},
 	}
 }
 
@@ -280,6 +315,62 @@ func LoadOptions(path string) (Options, error) {
 		opts.UploadBytes = 0
 		opts.SpeedDownloadURL = ""
 		opts.SpeedUploadURL = ""
+	}
+	// Experimental Cloudflare gaming-quality measurements are independent of
+	// the primary speed provider and its fallback policy.
+	opts.GamingQuality.Enabled = cfg.GamingTest.Enabled
+	if cfg.GamingTest.Concurrency > 0 {
+		opts.GamingQuality.Concurrency = cfg.GamingTest.Concurrency
+	}
+	if cfg.GamingTest.Timeout != "" {
+		d, e := time.ParseDuration(cfg.GamingTest.Timeout)
+		if e != nil || d <= 0 {
+			return opts, fmt.Errorf("gaming_test.timeout must be a positive duration: %q", cfg.GamingTest.Timeout)
+		}
+		opts.GamingQuality.Timeout = d
+	}
+	if cfg.GamingTest.LatencySamples > 0 {
+		opts.GamingQuality.LatencySamples = cfg.GamingTest.LatencySamples
+	}
+	if cfg.GamingTest.SampleInterval != "" {
+		d, e := time.ParseDuration(cfg.GamingTest.SampleInterval)
+		if e != nil || d <= 0 {
+			return opts, fmt.Errorf("gaming_test.sample_interval must be a positive duration: %q", cfg.GamingTest.SampleInterval)
+		}
+		opts.GamingQuality.SampleInterval = d
+	}
+	if cfg.GamingTest.DownloadBytes > 0 {
+		opts.GamingQuality.DownloadBytes = cfg.GamingTest.DownloadBytes
+	}
+	if cfg.GamingTest.UploadBytes > 0 {
+		opts.GamingQuality.UploadBytes = cfg.GamingTest.UploadBytes
+	}
+	for _, item := range []struct {
+		name string
+		value *float64
+		target *float64
+	}{
+		{"max_latency_ms", cfg.GamingTest.MaxLatencyMS, &opts.GamingQuality.MaxLatencyMS},
+		{"max_jitter_ms", cfg.GamingTest.MaxJitterMS, &opts.GamingQuality.MaxJitterMS},
+		{"max_loaded_latency_ms", cfg.GamingTest.MaxLoadedLatencyMS, &opts.GamingQuality.MaxLoadedLatencyMS},
+		{"max_loaded_jitter_ms", cfg.GamingTest.MaxLoadedJitterMS, &opts.GamingQuality.MaxLoadedJitterMS},
+	} {
+		if item.value != nil {
+			if *item.value < 0 {
+				return opts, fmt.Errorf("gaming_test.%s cannot be negative", item.name)
+			}
+			*item.target = *item.value
+		}
+	}
+	if opts.GamingQuality.Concurrency < 1 || opts.GamingQuality.Concurrency > 16 {
+		return opts, fmt.Errorf("gaming_test.concurrency must be between 1 and 16")
+	}
+	if opts.GamingQuality.LatencySamples < 3 || opts.GamingQuality.LatencySamples > 100 {
+		return opts, fmt.Errorf("gaming_test.latency_samples must be between 3 and 100")
+	}
+	if opts.GamingQuality.DownloadBytes < 64*1024 || opts.GamingQuality.DownloadBytes > 100<<20 ||
+		opts.GamingQuality.UploadBytes < 64*1024 || opts.GamingQuality.UploadBytes > 100<<20 {
+		return opts, fmt.Errorf("gaming_test download_bytes and upload_bytes must be between 64 KiB and 100 MiB")
 	}
 	if cfg.ServiceCheck.Concurrency > 0 {
 		opts.ServiceConcurrency = cfg.ServiceCheck.Concurrency
@@ -436,6 +527,19 @@ func ExampleConfig() string {
     "upload_bytes": 2097152,
     "download_url": "https://speed.cloudflare.com/__down?bytes={bytes}",
     "upload_url": "https://speed.cloudflare.com/__up"
+  },
+  "gaming_test": {
+    "enabled": false,
+    "concurrency": 1,
+    "timeout": "90s",
+    "latency_samples": 12,
+    "sample_interval": "250ms",
+    "download_bytes": 16777216,
+    "upload_bytes": 8388608,
+    "max_latency_ms": 50,
+    "max_jitter_ms": 10,
+    "max_loaded_latency_ms": 80,
+    "max_loaded_jitter_ms": 15
   },
   "service_check": {
     "concurrency": 4,
